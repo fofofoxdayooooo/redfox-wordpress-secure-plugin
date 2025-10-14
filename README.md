@@ -26,6 +26,23 @@ team redfox. wordpress-secure-plugin
 - POST,PUT,DELETEといった攻撃から守る
 ことを方向性としています。平たくいえば「WordPressを制御する」ためのものです。
 
+# それぞれの主機能
+* admin-ajax-blockerは、wp-admin/admin-ajax.phpの非ログインユーザーからのアクセスを防ぎます。
+* api-write-blockerは、REST APIやadmin-ajax.phpの動作を制限します（POST,PUT.DELETEなど）。そのためContact Form 7などは明示的にホワイトリストに追加する必要があります。
+* feed-access-controllerは、/feedや/blog/feedへのアクセスを禁止します（ホワイトリスト追加可能）。
+* media-file-limiterは、投稿できるファイルの容量を任意の容量に制限し、ホスティングサービスの容量ひっ迫を禁止すると同時に、mime type検証で不正なファイルの投稿を禁止します（プラグイン経由を含む）。
+* move-file-nameは、投稿されたファイル（スクリーンショット-2025-10-10.png）を強制的に日付ベースにリネームします（簡易拡張子制限つき）。
+* page-comment-controllerは誤って固定ページにコメント欄を開けた場合でもそれを無効にします。
+* remove-image-exif-dateは、WordPressで投稿された画像ファイルからEXIF情報（メタデータ）を消し去ります（GD依存）。
+* rest-api-shield-xml-rpc-blockerは、細かい経路のREST APIアクセスを禁止し、明示的にホワイトリストに追加しないプラグイン以外のアクセスを禁止するものです。（/wp-json/wp/v2/usersなど）。
+* uploads-security-managerは、/wp-content/*/uploadsに.htaccessを置く簡易的なプラグインです（filesディレクティブで想定されるペイロードをテキスト化します）。
+
+# 組み合わせて使うと？
+組み合わせて使うことを主目的としています。単体だけではなく、これらすべてを有効にしてデータを多層防御することが目的です。
+
+# なぜこのようなプラグインを？
+WordPressは、標準では様々な機能を公開状態で提供しています。しかし、REST APIに代表されるような情報を本来第三者に開示するべきではありません。そのため、積極的にデータを隠匿するために作りました。
+
 # redfox-wordpress-secure-plugin
 team redfox. wordpress-secure-plugin
 
@@ -53,3 +70,20 @@ and others are available.
 - Minimizes damage to WordPress itself when CVEs are discovered
 - Protects against attacks like POST, PUT, DELETE
 In simple terms, it's for “controlling WordPress.”
+
+# Primary Functions of Each Plugin
+* admin-ajax-blocker prevents non-logged-in users from accessing wp-admin/admin-ajax.php.
+* api-write-blocker restricts operations on the REST API and admin-ajax.php (POST, PUT, DELETE, etc.). Therefore, plugins like Contact Form 7 must be explicitly added to the whitelist.
+* feed-access-controller prohibits access to /feed and /blog/feed (whitelisting possible).
+* media-file-limiter restricts uploadable file sizes to any specified limit, preventing hosting service capacity strain, while also blocking invalid file uploads via MIME type validation (including via plugins).
+* move-file-name forcibly renames uploaded files (e.g., screenshot-2025-10-10.png) to a date-based format (with basic extension restrictions).
+* page-comment-controller disables comment sections on static pages, even if accidentally enabled.
+* remove-image-exif-date removes EXIF information (metadata) from image files uploaded to WordPress (GD dependency).
+* rest-api-shield-xml-rpc-blocker blocks REST API access to specific paths, prohibiting access from plugins not explicitly added to the whitelist (e.g., /wp-json/wp/v2/users).
+* uploads-security-manager is a simple plugin that places an .htaccess file in /wp-content/*/uploads (it converts payloads expected by the files directive into plain text).
+
+# What about using them together?
+Their primary purpose is to be used in combination. The goal is not just standalone use, but to enable all of them for multi-layered data protection.
+
+# Why create such plugins?
+WordPress, by default, exposes various functions publicly. However, information like that represented by the REST API should not be disclosed to third parties. Therefore, these were created to actively conceal data.

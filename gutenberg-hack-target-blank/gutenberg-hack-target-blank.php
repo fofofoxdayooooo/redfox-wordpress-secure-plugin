@@ -1,102 +1,176 @@
 <?php
 /**
- * Plugin Name: Post Field External Link Controller
- * Description: 投稿ごとにカスタムフィールド「ext_blank」を設定し、1で外部リンクに target="_blank" を付与します。0または未設定の場合は無効です。
- * Version: 1.0
+ * Plugin Name: Post Field Display & Link Controller
+ * Description: 投稿ごとのカスタムフィールド（no_thumbnail, full_content, link_attachments, ext_blank）を統合管理。外部リンクや画像リンクを自動制御します。
+ * Version: 2.0
  * Author: Red Fox (team Red Fox)
  * License: GPLv2 or later
  * Text Domain: post-field-external-link-controller
  */
 
-if ( ! defined( 'ABSPATH' ) ) {
-	exit;
-}
+if ( ! defined( 'ABSPATH' ) ) exit;
 
-/**
- * 編集画面にカスタムフィールドを常時表示
- * 「ext_blank」フィールドをメタボックスとして設置（1: 有効, 0: 無効）
- */
-function pfelc_add_meta_box() {
+/* =========================================================
+ * PART 1: 共通バリデーション・デフォルト処理
+ * ========================================================= */
+function pfdlc_validate_binary_field( $value, $default = '0' ) {
+	$value = sanitize_text_field( $value );
+	return ( $value === '1' || $value === '0' ) ? $value : $default;
+}
+add_filter( 'get_post_metadata', function( $value, $object_id, $meta_key, $single ) {
+	$fields = array( 'no_thumbnail', 'full_content', 'link_attachments', 'ext_blank' );
+	if ( $single && in_array( $meta_key, $fields, true ) && ( '' === $value || false === $value || array() === $value ) ) {
+		return '0';
+	}
+	return $value;
+}, 10, 4 );
+
+/* =========================================================
+ * PART 2: メタボックス登録
+ * ========================================================= */
+function pfdlc_add_meta_box() {
 	add_meta_box(
-		'pfelc_meta_box',
-		esc_html__( '外部リンク設定', 'post-field-external-link-controller' ),
-		'pfelc_render_meta_box',
+		'pfdlc_meta_box',
+		esc_html__( '投稿設定（外部リンク・表示制御）', 'post-field-display-link-controller' ),
+		'pfdlc_render_meta_box',
 		array( 'post', 'page' ),
-		'side',
+		'normal',
 		'default'
 	);
 }
-add_action( 'add_meta_boxes', 'pfelc_add_meta_box' );
+add_action( 'add_meta_boxes', 'pfdlc_add_meta_box' );
 
-/**
- * メタボックスの内容
- */
-function pfelc_render_meta_box( $post ) {
-	wp_nonce_field( 'pfelc_save_meta', 'pfelc_meta_nonce' );
-	$value = get_post_meta( $post->ID, 'ext_blank', true );
+/* =========================================================
+ * PART 3: メタボックスの内容
+ * ========================================================= */
+function pfdlc_render_meta_box( $post ) {
+	wp_nonce_field( 'pfdlc_save_meta', 'pfdlc_meta_nonce' );
 
-	echo '<label for="pfelc_ext_blank">';
-	echo esc_html__( '1で有効 / 0または空で無効', 'post-field-external-link-controller' );
-	echo '</label><br />';
-	echo '<input type="number" min="0" max="1" id="pfelc_ext_blank" name="pfelc_ext_blank" value="' . esc_attr( $value ) . '" style="width:80px;" />';
-	echo '<p class="description">' . esc_html__( '有効時、外部リンクに target="_blank" rel="noopener noreferrer" を付与します。内部リンクは対象外です。', 'post-field-external-link-controller' ) . '</p>';
+	$fields = array(
+		'no_thumbnail'     => get_post_meta( $post->ID, 'no_thumbnail', true ),
+		'full_content'     => get_post_meta( $post->ID, 'full_content', true ),
+		'link_attachments' => get_post_meta( $post->ID, 'link_attachments', true ),
+		'ext_blank'        => get_post_meta( $post->ID, 'ext_blank', true ),
+	);
+	?>
+	<style>
+		.pfdlc-label { display:block; margin-top:10px; font-weight:600; }
+		.pfdlc-input { width:50px; text-align:center; padding:5px; border:1px solid #ccc; border-radius:4px; }
+		.pfdlc-desc { font-size:12px; color:#666; margin-top:4px; }
+	</style>
+
+	<?php foreach ( $fields as $key => $val ) : ?>
+		<div>
+			<label for="<?php echo esc_attr( $key ); ?>" class="pfdlc-label"><?php echo esc_html( $key ); ?></label>
+			<input type="text" id="<?php echo esc_attr( $key ); ?>" name="<?php echo esc_attr( $key ); ?>" value="<?php echo esc_attr( $val ); ?>" class="pfdlc-input" placeholder="0 or 1" />
+			<p class="pfdlc-desc">
+				<?php
+				switch ( $key ) {
+					case 'no_thumbnail':
+						echo esc_html__( '1: サムネイル非表示 / 0: 表示', 'post-field-display-link-controller' );
+						break;
+					case 'full_content':
+						echo esc_html__( '1: 全文表示 / 0: 抜粋表示（500文字超で強制0）', 'post-field-display-link-controller' );
+						break;
+					case 'link_attachments':
+						echo esc_html__( '1: 投稿画像を添付ページにリンク / 0: 無効', 'post-field-display-link-controller' );
+						break;
+					case 'ext_blank':
+						echo esc_html__( '1: 外部リンクを新しいタブで開く / 0: 無効', 'post-field-display-link-controller' );
+						break;
+				}
+				?>
+			</p>
+		</div>
+	<?php endforeach; ?>
+	<?php
 }
 
-/**
- * 保存処理
- */
-function pfelc_save_meta( $post_id ) {
-	if ( ! isset( $_POST['pfelc_meta_nonce'] ) || ! wp_verify_nonce( $_POST['pfelc_meta_nonce'], 'pfelc_save_meta' ) ) {
+/* =========================================================
+ * PART 4: 保存処理
+ * ========================================================= */
+function pfdlc_save_meta( $post_id ) {
+	if ( ! isset( $_POST['pfdlc_meta_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['pfdlc_meta_nonce'] ) ), 'pfdlc_save_meta' ) ) {
 		return;
 	}
-	if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
-		return;
-	}
-	if ( ! current_user_can( 'edit_post', $post_id ) ) {
-		return;
+	if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
+	if ( ! current_user_can( 'edit_post', $post_id ) ) return;
+
+	$post = get_post( $post_id );
+	if ( ! $post ) return;
+
+	$fields = array( 'no_thumbnail', 'full_content', 'link_attachments', 'ext_blank' );
+	$data   = array();
+
+	foreach ( $fields as $key ) {
+		$input_value = isset( $_POST[ $key ] ) ? wp_unslash( $_POST[ $key ] ) : '0';
+		$data[ $key ] = pfdlc_validate_binary_field( $input_value );
 	}
 
-	$val = isset( $_POST['pfelc_ext_blank'] ) ? sanitize_text_field( $_POST['pfelc_ext_blank'] ) : '';
-	if ( $val !== '1' ) {
-		$val = '0';
+	// 本文500文字超過 → full_content=0強制
+	if ( mb_strlen( wp_strip_all_tags( $post->post_content ) ) > 500 ) {
+		$data['full_content'] = '0';
 	}
-	update_post_meta( $post_id, 'ext_blank', $val );
+
+	// full_content=1 → no_thumbnail=1を強制
+	if ( '1' === $data['full_content'] ) {
+		$data['no_thumbnail'] = '1';
+	}
+
+	foreach ( $data as $key => $val ) {
+		update_post_meta( $post_id, $key, $val );
+	}
 }
-add_action( 'save_post', 'pfelc_save_meta' );
+add_action( 'save_post', 'pfdlc_save_meta' );
 
-/**
- * コンテンツ内リンク変換処理
- */
-function pfelc_content_filter( $content ) {
+/* =========================================================
+ * PART 5: コンテンツ変換（外部リンク＋画像リンク）
+ * ========================================================= */
+function pfdlc_content_filter( $content ) {
 	if ( ! is_singular() || ! in_the_loop() || ! is_main_query() ) {
 		return $content;
 	}
 
-	$post_id = get_the_ID();
-	$enable  = get_post_meta( $post_id, 'ext_blank', true );
+	global $post;
+	$ext_blank        = get_post_meta( $post->ID, 'ext_blank', true );
+	$link_attachments = get_post_meta( $post->ID, 'link_attachments', true );
 
-	if ( $enable !== '1' ) {
-		return $content; // 無効なら何もしない
+	// --- 外部リンク target="_blank" ---
+	if ( '1' === $ext_blank ) {
+		$home = preg_quote( home_url(), '/' );
+		$content = preg_replace_callback(
+			'/<a\s+[^>]*href=["\'](https?:\/\/[^"\']+)["\'][^>]*>/i',
+			function ( $m ) use ( $home ) {
+				$url = $m[1];
+				if ( preg_match( '/' . $home . '/i', $url ) ) return $m[0];
+				if ( ! preg_match( '/target=/i', $m[0] ) ) {
+					return str_replace( $url, $url . '" target="_blank" rel="noopener noreferrer', $m[0] );
+				}
+				return $m[0];
+			},
+			$content
+		);
 	}
 
-	$home_url = preg_quote( home_url(), '/' ); // 内部リンク判定用
-	$content  = preg_replace_callback(
-		'/<a\s+[^>]*href=["\'](https?:\/\/[^"\']+)["\'][^>]*>/i',
-		function ( $matches ) use ( $home_url ) {
-			$url = $matches[1];
-			if ( preg_match( '/' . $home_url . '/i', $url ) ) {
-				return $matches[0]; // 自サイト内リンクはスルー
-			}
-			// targetとrelを付与
-			if ( ! preg_match( '/target=/i', $matches[0] ) ) {
-				$link = str_replace( $url, $url . '" target="_blank" rel="noopener noreferrer', $matches[0] );
-				return $link;
-			}
-			return $matches[0];
-		},
-		$content
-	);
+	// --- 添付画像リンク化 ---
+	if ( '1' === $link_attachments ) {
+		$content = preg_replace_callback(
+			'/<img[^>]*?class=["\'][^"\']*wp-image-(\d+)[^"\']*["\'][^>]*?>/i',
+			function ( $matches ) {
+				$img_tag = $matches[0];
+				$attachment_id = (int) $matches[1];
+				if ( $attachment_id ) {
+					$link = get_attachment_link( $attachment_id );
+					if ( $link && ! is_wp_error( $link ) ) {
+						return '<a href="' . esc_url( $link ) . '">' . $img_tag . '</a>';
+					}
+				}
+				return $img_tag;
+			},
+			$content
+		);
+	}
 
 	return $content;
 }
-add_filter( 'the_content', 'pfelc_content_filter', 999 );
+add_filter( 'the_content', 'pfdlc_content_filter', 15 );

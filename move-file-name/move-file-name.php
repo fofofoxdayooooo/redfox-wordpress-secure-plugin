@@ -1,291 +1,297 @@
 <?php
 /**
- * Plugin Name: Upload File Renamer (アップロードファイル名強制リネーム)
- * Description: アップロード時にファイル名を強制的にリネームします。Base64付与やスラッグ形式のカスタマイズも可能です。
+ * Plugin Name: Admin Ajax Blocker
+ * Description: 非ログインユーザーによる「wp-admin/admin-ajax.php」へのアクセスをグローバルにブロックします。エラーコードやメッセージ、HTTPステータスコードを設定画面で自由にカスタマイズできます。
  * Plugin URI: https://p-fox.jp/
- * Version: 1.0.0
- * Author: Red Fox
+ * Version: 1.0
+ * Author: Red Fox(team Red Fox)
  * Author URI: https://p-fox.jp/
  * License: GPLv2 or later
  * License URI: http://www.gnu.org/licenses/gpl-2.0.html
- * Text Domain: move-file-name
+ * Text Domain: admin-ajax-blocker
  * Requires at least: 6.8
- * Requires PHP: 7.2
+ * Requires PHP: 7.4
  */
 
+// 直接ファイルにアクセスされた場合の保護
 if ( ! defined( 'ABSPATH' ) ) {
-	exit;
+    exit;
 }
 
-// ----------------------------------------------------
-// 管理画面設定
-// ----------------------------------------------------
+// --------------------------------------------------------
+// 1. 管理画面に設定項目を追加 (設定 > ディスカッション)
+// --------------------------------------------------------
 
-add_action('admin_menu', 'mfn_add_admin_menu');
-add_action('admin_init', 'mfn_settings_init');
+/**
+ * 設定メニューの登録とフィールドの追加
+ */
+function aab_register_settings() {
+    // 1. ブロック機能の有効/無効
+    register_setting(
+        'discussion',
+        'aab_enable_block',
+        array(
+            'type'            => 'boolean',
+            'sanitize_callback' => 'intval',
+            'default'         => 0,
+        )
+    );
 
-function mfn_add_admin_menu() {
-	add_options_page(
-		esc_html__('ファイルリネーム設定', 'move-file-name'),
-		esc_html__('ファイルリネーム', 'move-file-name'),
-		'manage_options',
-		'mfn-settings-page',
-		'mfn_settings_page_callback'
-	);
+    // 2. HTTP ステータスコード
+    register_setting(
+        'discussion',
+        'aab_status_code',
+        array(
+            'type'            => 'string',
+            'sanitize_callback' => 'sanitize_text_field',
+            'default'         => '403',
+        )
+    );
+
+    // 3. JSON エラーコード
+    register_setting(
+        'discussion',
+        'aab_error_code',
+        array(
+            'type'            => 'string',
+            'sanitize_callback' => 'sanitize_text_field',
+            'default'         => 'login_required',
+        )
+    );
+
+    // 4. JSON エラーメッセージ
+    register_setting(
+        'discussion',
+        'aab_error_message',
+        array(
+            'type'            => 'string',
+            'sanitize_callback' => 'sanitize_text_field',
+            'default'         => 'Access Forbidden. Login is required.',
+        )
+    );
+
+    // 5. 【新規】ホワイトリストアクション
+    register_setting(
+        'discussion',
+        'aab_whitelisted_actions',
+        array(
+            'type'            => 'string',
+            // カンマ区切りのリストとしてサニタイズ
+            'sanitize_callback' => 'aab_sanitize_whitelisted_actions',
+            'default'         => '',
+        )
+    );
+
+
+    // 設定セクションを追加
+    add_settings_section(
+        'aab_blocker_section',
+        esc_html__('Admin AJAX ブロック設定', 'admin-ajax-blocker'),
+        'aab_blocker_section_callback',
+        'discussion'
+    );
+
+    // 1. 有効/無効チェックボックス
+    add_settings_field(
+        'aab_enable_block_field',
+        esc_html__('ブロック機能の有効化', 'admin-ajax-blocker'),
+        'aab_enable_block_field_callback',
+        'discussion',
+        'aab_blocker_section'
+    );
+
+    // 5. 【新規】ホワイトリストアクションフィールド
+    add_settings_field(
+        'aab_whitelisted_actions_field',
+        esc_html__('ホワイトリストアクション', 'admin-ajax-blocker'),
+        'aab_whitelisted_actions_field_callback',
+        'discussion',
+        'aab_blocker_section'
+    );
+
+    // 2. HTTP ステータスコード
+    add_settings_field(
+        'aab_status_code_field',
+        esc_html__('HTTPステータスコード', 'admin-ajax-blocker'),
+        'aab_status_code_field_callback',
+        'discussion',
+        'aab_blocker_section'
+    );
+
+    // 3. JSON エラーコード
+    add_settings_field(
+        'aab_error_code_field',
+        esc_html__('JSONエラーコード', 'admin-ajax-blocker'),
+        'aab_error_code_field_callback',
+        'discussion',
+        'aab_blocker_section'
+    );
+    
+    // 4. JSON エラーメッセージ
+    add_settings_field(
+        'aab_error_message_field',
+        esc_html__('JSONエラーメッセージ', 'admin-ajax-blocker'),
+        'aab_error_message_field_callback',
+        'discussion',
+        'aab_blocker_section'
+    );
+}
+add_action('admin_init', 'aab_register_settings');
+
+/**
+ * ホワイトリストアクションのサニタイズコールバック
+ * カンマ区切りリストを受け取り、安全な文字列に整形します。
+ * @param string $input 入力値
+ * @return string サニタイズされた値
+ */
+function aab_sanitize_whitelisted_actions($input) {
+    // カンマ、スペース、改行などを区切り文字とし、アクション名として有効な文字のみを残す
+    $actions = explode(',', $input);
+    $sanitized_actions = array_map(function($action) {
+        // アクション名はキーとしてサニタイズするのが適切
+        return sanitize_key(trim($action)); 
+    }, $actions);
+
+    // 空の要素を取り除き、カンマとスペース区切りで戻す
+    return implode(', ', array_filter($sanitized_actions));
 }
 
-function mfn_settings_page_callback() {
-	if ( ! current_user_can('manage_options') ) {
-		return;
-	}
-	?>
-	<div class="wrap">
-		<h1><?php echo esc_html( get_admin_page_title() ); ?></h1>
-		<form action="options.php" method="post">
-			<?php
-			settings_fields('mfn_options_group');
-			do_settings_sections('mfn-settings-page');
-			submit_button(esc_html__('設定を保存', 'move-file-name'));
-			?>
-		</form>
-	</div>
-	<?php
+
+/**
+ * セクションの説明を表示
+ */
+function aab_blocker_section_callback() {
+    echo '<p>' . esc_html__('非ログインユーザーが admin-ajax.php にアクセスした際の動作を制御します。ホワイトリストに登録されていないアクションはブロックされます。', 'admin-ajax-blocker') . '</p>';
 }
 
-function mfn_settings_init() {
-	register_setting('mfn_options_group', 'mfn_enable_rename', [
-		'default' => 1,
-		'type' => 'boolean',
-		'sanitize_callback' => 'intval',
-	]);
+/**
+ * 有効/無効チェックボックスのHTML
+ */
+function aab_enable_block_field_callback() {
+    $option = get_option('aab_enable_block');
+    $checked = checked(1, $option, false);
 
-	register_setting('mfn_options_group', 'mfn_rename_format', [
-		'default' => 'Ymd_His_',
-		'type' => 'string',
-		'sanitize_callback' => 'sanitize_text_field',
-	]);
-
-	register_setting('mfn_options_group', 'mfn_forbidden_extensions', [
-		'default' => 'exe, php, phtml, html, shtml, js',
-		'type' => 'string',
-		'sanitize_callback' => 'mfn_sanitize_forbidden_extensions',
-	]);
-
-	register_setting('mfn_options_group', 'mfn_enable_base64', [
-		'default' => 0,
-		'type' => 'boolean',
-		'sanitize_callback' => 'intval',
-	]);
-
-	register_setting('mfn_options_group', 'mfn_base64_length', [
-		'default' => 16,
-		'type' => 'integer',
-		'sanitize_callback' => 'absint',
-	]);
-
-	register_setting('mfn_options_group', 'mfn_slug_format', [
-		'default' => 'media-%Y%m%d-%H%M%S',
-		'type' => 'string',
-		'sanitize_callback' => 'sanitize_text_field',
-	]);
-
-	add_settings_section(
-		'mfn_main_section',
-		esc_html__('アップロードファイル名強制リネーム設定', 'move-file-name'),
-		'mfn_section_callback',
-		'mfn-settings-page'
-	);
-
-	add_settings_field(
-		'mfn_enable_rename',
-		esc_html__('リネームを強制する', 'move-file-name'),
-		'mfn_toggle_callback',
-		'mfn-settings-page',
-		'mfn_main_section'
-	);
-
-	add_settings_field(
-		'mfn_rename_format',
-		esc_html__('リネーム形式', 'move-file-name'),
-		'mfn_format_callback',
-		'mfn-settings-page',
-		'mfn_main_section'
-	);
-
-	add_settings_field(
-		'mfn_forbidden_extensions',
-		esc_html__('禁止拡張子', 'move-file-name'),
-		'mfn_forbidden_callback',
-		'mfn-settings-page',
-		'mfn_main_section'
-	);
-
-	add_settings_field(
-		'mfn_enable_base64',
-		esc_html__('Base64付与を有効にする', 'move-file-name'),
-		'mfn_base64_toggle_callback',
-		'mfn-settings-page',
-		'mfn_main_section'
-	);
-
-	add_settings_field(
-		'mfn_base64_length',
-		esc_html__('Base64文字列の長さ', 'move-file-name'),
-		'mfn_base64_length_callback',
-		'mfn-settings-page',
-		'mfn_main_section'
-	);
+    echo '<label for="aab_enable_block">';
+    echo '<input type="checkbox" id="aab_enable_block" name="aab_enable_block" value="1" ' . esc_attr( $checked ) . '/>';
+    echo esc_html__('非ログインユーザーによるadmin-ajax.phpへのアクセスをブロックする', 'admin-ajax-blocker');
+    echo '</label>';
+    echo '<p class="description">' . esc_html__('チェックを入れると、未ログイン状態でのadmin-ajax.phpへのリクエストは、ホワイトリストに記載されたアクションを除き、全てカスタムエラーで終了します。', 'admin-ajax-blocker') . '</p>';
 }
 
-function mfn_section_callback() {
-	echo '<p>' . esc_html__('アップロード時のファイル名とスラッグ(post_name)の匿名化設定を行います。', 'move-file-name') . '</p>';
+/**
+ * HTTP ステータスコードのテキスト入力
+ */
+function aab_status_code_field_callback() {
+    $option = get_option('aab_status_code', '403');
+    echo '<input type="text" id="aab_status_code" name="aab_status_code" value="' . esc_attr($option) . '" class="regular-text" placeholder="例: 403" />';
+    echo '<p class="description">' . esc_html__('サーバーが返すHTTPステータスコード（例: 403, 401, 503など）を自由に入力してください。', 'admin-ajax-blocker') . '</p>';
 }
 
-function mfn_toggle_callback() {
-	$is_enabled = get_option('mfn_enable_rename', 1);
-	?>
-	<input type="checkbox" name="mfn_enable_rename" value="1" <?php checked(1, $is_enabled); ?>>
-	<label><?php esc_html_e('オンにすると、アップロード時にファイル名を強制的にリネームします。', 'move-file-name'); ?></label>
-	<?php
+/**
+ * JSON エラーコードのテキスト入力
+ */
+function aab_error_code_field_callback() {
+    $option = get_option('aab_error_code', 'login_required');
+    echo '<input type="text" id="aab_error_code" name="aab_error_code" value="' . esc_attr($option) . '" class="regular-text" />';
+    echo '<p class="description">' . esc_html__('JSONレスポンスに含まれるエラーの識別コード（例: login_required）。', 'admin-ajax-blocker') . '</p>';
 }
 
-function mfn_format_callback() {
-	$format = get_option('mfn_rename_format', 'Ymd_His_');
-	?>
-	<input type="text" name="mfn_rename_format" value="<?php echo esc_attr($format); ?>" class="regular-text">
-	<p class="description"><?php esc_html_e('PHPのdate()関数形式で指定します。', 'move-file-name'); ?></p>
-	<?php
+/**
+ * JSON エラーメッセージのテキスト入力
+ */
+function aab_error_message_field_callback() {
+    $option = get_option('aab_error_message', 'Access Forbidden. Login is required.');
+    echo '<input type="text" id="aab_error_message" name="aab_error_message" value="' . esc_attr($option) . '" class="regular-text" />';
+    echo '<p class="description">' . esc_html__('JSONレスポンスに含まれるエラーメッセージ。', 'admin-ajax-blocker') . '</p>';
 }
 
-function mfn_forbidden_callback() {
-	$forbidden_list = get_option('mfn_forbidden_extensions', 'exe, php, phtml, html, shtml, js');
-	?>
-	<input type="text" name="mfn_forbidden_extensions" value="<?php echo esc_attr($forbidden_list); ?>" class="regular-text large-text">
-	<p class="description"><?php esc_html_e('アップロード禁止拡張子をカンマ区切りで指定します。', 'move-file-name'); ?></p>
-	<?php
+/**
+ * 【新規】ホワイトリストアクションのテキスト入力
+ */
+function aab_whitelisted_actions_field_callback() {
+    $option = get_option('aab_whitelisted_actions', '');
+    echo '<input type="text" id="aab_whitelisted_actions" name="aab_whitelisted_actions" value="' . esc_attr($option) . '" class="large-text" placeholder="例: woocommerce_add_to_cart, my_public_form_submit" />';
+    echo '<p class="description">' . esc_html__('非ログインユーザーからのアクセスを許可するAJAXアクション名（$_POST[\'action\']の値）をカンマ区切りで入力してください。', 'admin-ajax-blocker') . '</p>';
 }
 
-function mfn_base64_toggle_callback() {
-	$enable_base64 = get_option('mfn_enable_base64', 0);
-	?>
-	<input type="checkbox" name="mfn_enable_base64" value="1" <?php checked(1, $enable_base64); ?>>
-	<label><?php esc_html_e('オンにするとファイル名末尾にBase64文字列を付与します。', 'move-file-name'); ?></label>
-	<?php
+
+// --------------------------------------------------------
+// 2. コアのAJAXブロックロジック (更新済み)
+// --------------------------------------------------------
+
+/**
+ * 非ログインユーザーによるadmin-ajax.phpへのアクセスをブロック
+ */
+function aab_block_admin_ajax() {
+    // 1. AJAXリクエストでなければ終了
+    if ( ! defined( 'DOING_AJAX' ) || ! DOING_AJAX ) {
+        return;
+    }
+
+    // 2. ブロック機能が無効なら終了
+    if ( ! get_option( 'aab_enable_block', 0 ) ) {
+        return;
+    }
+
+    // 3. ユーザーがログインしていれば終了 (ブロックしない)
+    if ( is_user_logged_in() ) {
+        return;
+    }
+    
+    // 4. 【ホワイトリストチェック】: 許可されたアクションであればブロックせずに終了
+    // Nonce検証が必要なのは状態を変更するアクションハンドラ側であり、
+    // このブロック関数はアクション名を取得して判断するだけで状態を変更しないため、Nonce検証を省略します。
+    // phpcs:disable WordPress.Security.NonceVerification.Missing
+    $requested_action = isset( $_POST['action'] ) ? sanitize_key( $_POST['action'] ) : '';
+    // phpcs:enable
+
+    if ( $requested_action ) {
+        $whitelisted_actions_string = get_option( 'aab_whitelisted_actions', '' );
+        // カンマ区切り文字列を配列に変換し、スペースなどをトリム
+        $whitelisted_actions = array_map( 'trim', explode( ',', $whitelisted_actions_string ) );
+        $whitelisted_actions = array_filter( $whitelisted_actions ); // 空要素を除去
+
+        // リクエストされたアクションがホワイトリストに含まれていれば、ブロックせずに処理を継続
+        if ( in_array( $requested_action, $whitelisted_actions, true ) ) {
+            return; 
+        }
+    }
+    
+    // 5. 非ログインユーザー、機能有効、ホワイトリスト外なのでブロック処理を実行
+    $status_code = (int) get_option( 'aab_status_code', 403 );
+    $error_code = get_option( 'aab_error_code', 'login_required' );
+    $error_message = get_option( 'aab_error_message', 'Access Forbidden. Login is required.' );
+    
+    // wp_send_json_error を使用して、カスタムエラーコードとHTTPステータスコードを返す
+    wp_send_json_error( 
+        [ 
+            'code'      => $error_code, 
+            'message'   => $error_message,
+            // 互換性のため、ステータスコードは 'data' 内部にも含める (ユーザーの元の構造を維持)
+            'data'      => ['status' => $status_code], 
+        ], 
+        $status_code 
+    );
+    
+    // 念のため exit も残しておく
+    exit;
 }
+// initの非常に早い段階 (優先度1) で実行し、他のAJAXアクションがトリガーされる前にブロックします
+add_action( 'init', 'aab_block_admin_ajax', 1 );
 
-function mfn_base64_length_callback() {
-	$length = get_option('mfn_base64_length', 16);
-	?>
-	<select name="mfn_base64_length">
-		<option value="16" <?php selected($length, 16); ?>>16</option>
-		<option value="32" <?php selected($length, 32); ?>>32</option>
-	</select>
-	<p class="description"><?php esc_html_e('付与するBase64文字列の長さを指定します。', 'move-file-name'); ?></p>
-	<?php
+
+// --------------------------------------------------------
+// 3. アンインストール時の処理 (クリーンアップ) (更新済み)
+// --------------------------------------------------------
+
+/**
+ * プラグイン削除時にデータベースのオプションをクリーンアップする
+ */
+function aab_uninstall_cleanup() {
+    delete_option( 'aab_enable_block' );
+    delete_option( 'aab_status_code' );
+    delete_option( 'aab_error_code' );
+    delete_option( 'aab_error_message' );
+    delete_option( 'aab_whitelisted_actions' ); // 新しいオプションを追加
 }
-
-// ----------------------------------------------------
-// ファイル名リネームロジック
-// ----------------------------------------------------
-
-add_filter('wp_handle_upload_prefilter', 'mfn_force_rename_uploaded_file');
-
-function mfn_force_rename_uploaded_file($file) {
-	if ( ! get_option('mfn_enable_rename', 1) ) {
-		return $file;
-	}
-
-
-	$info = pathinfo($file['name']);
-	$ext  = isset($info['extension']) ? strtolower($info['extension']) : '';
-
-	if ( 'zip' === $ext ) {
-		return $file;
-	}
-
-	$forbidden_list_string = get_option('mfn_forbidden_extensions', 'exe, php, phtml, html, shtml, js');
-	$forbidden_extensions  = array_map('trim', explode(',', strtolower($forbidden_list_string)));
-
-	if ( $ext && in_array($ext, $forbidden_extensions, true) ) {
-		$file['error'] = sprintf(
-			// translators: %s is the forbidden file extension (e.g., 'exe')
-			esc_html__('セキュリティ上の理由により、ファイル拡張子「.%s」のアップロードは禁止されています。', 'move-file-name'),
-			$ext
-		);
-		return $file;
-	}
-
-	$format_string = get_option('mfn_rename_format', 'Ymd_His_');
-	$ext_with_dot  = $ext ? '.' . $ext : '';
-	$date_prefix   = gmdate($format_string);
-
-	$random = bin2hex(random_bytes(3));
-
-	$enable_base64  = (int) get_option('mfn_enable_base64', 0);
-	$base64_length  = (int) get_option('mfn_base64_length', 16);
-	if ( $enable_base64 ) {
-		$b64 = substr(str_replace(['+', '/', '='], '', base64_encode(random_bytes($base64_length))), 0, $base64_length);
-		$b64 = strtolower($b64);
-		$random .= '_' . $b64;
-	}
-
-	$new_filename_base = $date_prefix . uniqid('') . '_' . $random;
-	$file['name']      = $new_filename_base . $ext_with_dot;
-
-	return $file;
-}
-
-// ----------------------------------------------------
-// メディアタイトルとスラッグ匿名化
-// ----------------------------------------------------
-
-add_filter('wp_insert_post_data', 'mfn_sanitize_attachment_title', 10, 2);
-
-function mfn_sanitize_attachment_title($data, $postarr) {
-	if ( 'attachment' !== $data['post_type'] ) {
-		return $data;
-	}
-	if ( ! get_option('mfn_enable_rename', 1) ) {
-		return $data;
-	}
-
-	// translators: %s is the localized current date and time (e.g., "2025-10-17 15:32:00")
-	$new_title_format = esc_html__('メディアファイル %s', 'move-file-name');
-	$date_string      = date_i18n('Y-m-d H:i:s', current_time('timestamp', 0));
-	$new_title        = sprintf($new_title_format, $date_string);
-
-	$data['post_title'] = $new_title;
-
-	$slug_format = get_option('mfn_slug_format', 'media-%Y%m%d-%H%M%S');
-	$slug_string = gmdate(str_replace('%', '', $slug_format));
-	$data['post_name']  = sanitize_title($slug_string);
-
-	return $data;
-}
-
-// ----------------------------------------------------
-// アンインストール処理
-// ----------------------------------------------------
-
-function mfn_uninstall_cleanup() {
-	delete_option('mfn_enable_rename');
-	delete_option('mfn_rename_format');
-	delete_option('mfn_forbidden_extensions');
-	delete_option('mfn_enable_base64');
-	delete_option('mfn_base64_length');
-	delete_option('mfn_slug_format');
-}
-register_uninstall_hook(__FILE__, 'mfn_uninstall_cleanup');
-
-// ----------------------------------------------------
-// サニタイズ関数
-// ----------------------------------------------------
-
-function mfn_sanitize_forbidden_extensions($input) {
-	$input = strtolower($input);
-	$extensions = array_map('trim', explode(',', $input));
-	$sanitized_extensions = array_map(function($ext) {
-		return preg_replace('/[^a-z0-9]/', '', $ext);
-	}, $extensions);
-	return implode(', ', array_filter($sanitized_extensions));
-}
+register_uninstall_hook( __FILE__, 'aab_uninstall_cleanup' );

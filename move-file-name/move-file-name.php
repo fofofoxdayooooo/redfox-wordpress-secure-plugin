@@ -23,6 +23,26 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 add_action('admin_menu', 'mfn_add_admin_menu');
 add_action('admin_init', 'mfn_settings_init');
+add_filter('wp_handle_upload_prefilter', 'mfn_force_rename_uploaded_file');
+add_filter('wp_handle_sideload_prefilter', 'mfn_force_rename_uploaded_file');
+add_filter('rest_pre_insert_attachment', 'mfn_rest_force_rename', 10, 2);
+add_filter('wp_insert_post_data', 'mfn_sanitize_attachment_title', 10, 2);
+
+
+function mfn_rest_force_rename($prepared_post, $request) {
+	if ( ! get_option('mfn_enable_rename', 1) ) {
+		return $prepared_post;
+	}
+	$random = md5(uniqid('', true));
+
+	$prepared_post->post_title = sprintf(
+		esc_html__($random, 'move-file-name'),
+		date_i18n('Y-m-d H:i:s', current_time('timestamp', 0))
+	);
+
+	return $prepared_post;
+}
+
 
 function mfn_add_admin_menu() {
 	add_options_page(

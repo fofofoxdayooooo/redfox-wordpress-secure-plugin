@@ -92,6 +92,38 @@ function mar_restrict_media_query_fix( $query ) {
 }
 
 /**
+ * 投稿一覧でも他人の投稿を非表示にする
+ */
+add_action( 'pre_get_posts', 'mar_restrict_post_list_query' );
+function mar_restrict_post_list_query( $query ) {
+
+	// 管理画面以外は無視
+	if ( ! is_admin() || ! $query->is_main_query() ) {
+		return;
+	}
+
+	// 投稿一覧以外は対象外（例: カスタム投稿タイプやメディア一覧を除外）
+	if ( empty( $query->query_vars['post_type'] ) || 'post' !== $query->query_vars['post_type'] ) {
+		return;
+	}
+
+	// 管理者は全件OK
+	if ( current_user_can( 'manage_options' ) ) {
+		return;
+	}
+
+	// 編集者はどう扱うか？（オプションで共通化することも可能）
+	$allow_editors = get_option( 'mar_allow_editors_view_all', false );
+	if ( current_user_can( 'edit_others_posts' ) && $allow_editors ) {
+		return; // 許可ONなら全件閲覧
+	}
+
+	// それ以外は自分の投稿だけ
+	$query->set( 'author', get_current_user_id() );
+}
+
+
+/**
  * REST API側（ブロックエディタ/Gutenberg対応）
  */
 add_filter( 'rest_media_query', 'mar_rest_media_query_fix', 10, 2 );

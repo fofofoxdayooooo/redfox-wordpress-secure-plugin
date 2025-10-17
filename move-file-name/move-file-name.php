@@ -36,7 +36,7 @@ function mfn_rest_force_rename($prepared_post, $request) {
 	$random = md5(uniqid('', true));
 
 	$prepared_post->post_title = sprintf(
-		esc_html__($random, 'move-file-name'),
+		esc_html($random, 'move-file-name'),
 		date_i18n('Y-m-d H:i:s', current_time('timestamp', 0))
 	);
 

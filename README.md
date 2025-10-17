@@ -37,7 +37,7 @@ team redfox. wordpress-secure-plugin
 * rest-api-shield-xml-rpc-blockerは、細かい経路のREST APIアクセスを禁止し、明示的にホワイトリストに追加しないプラグイン以外のアクセスを禁止するものです。（/wp-json/wp/v2/usersなど）。
 * uploads-security-managerは、/wp-content/*/uploadsに.htaccessを置く簡易的なプラグインです（filesディレクティブで想定されるペイロードをテキスト化します）。
 * gutenberg-hack-target-blankは、Gutenberg使用時に外部のaタグを一括してtarget blankにしてくれると同時に全画像を一括でリンクしてくれます（クラシックエディタでも利用可能）。
-* media-access-restrictorは、管理者以外の複数人管理サイト向けで、管理者以外の利用者は別の利用者の投稿ファイルを見ることができなくなります（情報漏洩対策）。
+* media-access-restrictorは、管理者以外の複数人管理サイト向けで、管理者以外の利用者は別の利用者の投稿ファイルを見ることができなくなります。編集者は許可制で閲覧可能（情報漏洩対策）。
 
 # 組み合わせて使うと？
 組み合わせて使うことを主目的としています。単体だけではなく、これらすべてを有効にしてデータを多層防御することが目的です。
@@ -84,7 +84,7 @@ In simple terms, it's for “controlling WordPress.”
 * rest-api-shield-xml-rpc-blocker blocks REST API access to specific paths, prohibiting access from plugins not explicitly added to the whitelist (e.g., /wp-json/wp/v2/users).
 * uploads-security-manager is a simple plugin that places an .htaccess file in /wp-content/*/uploads (it converts payloads expected by the files directive into plain text).
 * gutenberg-hack-target-blank automatically sets all external a tags to target=blank when using Gutenberg and simultaneously links all images (also usable with the Classic Editor).
-* media-access-restrictor is designed for multi-author sites where non-admin users cannot view other users' uploaded files (information leak prevention).
+* media-access-restrictor is designed for multi-author sites where non-admin users cannot view other users' uploaded files. Editors can view files only with permission (information leak prevention).
 
 # What about using them together?
 Their primary purpose is to be used in combination. The goal is not just standalone use, but to enable all of them for multi-layered data protection.

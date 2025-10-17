@@ -153,11 +153,17 @@ function casc_parse_request( $query ) {
 	global $wpdb;
 
 	$slug = sanitize_title( $query->query_vars['author_name'] );
+
+	// slug が空白の場合はデフォルト動作（404回避）
+	if ( empty( $slug ) ) {
+		return;
+	}
+
 	$cache_key = 'casc_user_' . md5( $slug );
 	$user = wp_cache_get( $cache_key, 'casc' );
 	
 	if ( false === $user ) {
-		// usermeta テーブルを直接検索（meta_query を使用しない）
+		// custom_author_slug 検索
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$user_id = $wpdb->get_var(
 			$wpdb->prepare(
@@ -172,23 +178,30 @@ function casc_parse_request( $query ) {
 		if ( $user_id ) {
 			$user = get_user_by( 'id', (int) $user_id );
 		} else {
-			$user = null;
+			// fallback: nicename で取得
+			$user = get_user_by( 'slug', $slug );
 		}
 
 		wp_cache_set( $cache_key, $user, 'casc', 3600 );
 	}
 
-	if ( $user instanceof WP_User ) {
-		$user_id = $user->ID;
-		if ( get_user_meta( $user_id, 'hide_author_page', true ) ) {
-			status_header( 404 );
-			nocache_headers();
-			include get_query_template( '404' );
-			exit;
-		}
-		$query->query_vars['author'] = $user_id;
-		unset( $query->query_vars['author_name'] );
+	// 該当ユーザーが見つからない場合は通常の処理へ
+	if ( ! ( $user instanceof WP_User ) ) {
+		return;
 	}
+
+	$user_id = $user->ID;
+
+	// 非表示設定なら強制404
+	if ( get_user_meta( $user_id, 'hide_author_page', true ) ) {
+		status_header( 404 );
+		nocache_headers();
+		include get_query_template( '404' );
+		exit;
+	}
+
+	$query->query_vars['author'] = $user_id;
+	unset( $query->query_vars['author_name'] );
 }
 add_action( 'pre_get_posts', 'casc_parse_request' );
 

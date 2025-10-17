@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: Upload File Renamer (アップロードファイル名強制リネーム)
- * Description: アップロード時にファイル名を強制的にリネームします。リネームの有無と形式（date()関数書式）を管理画面で設定できます。
+ * Description: アップロード時にファイル名を強制的にリネームします。Base64付与やスラッグ形式のカスタマイズも可能です。
  * Plugin URI: https://p-fox.jp/
  * Version: 1.0.0
  * Author: Red Fox
@@ -13,337 +13,279 @@
  * Requires PHP: 7.2
  */
 
-// 直接ファイルにアクセスされた場合の保護
 if ( ! defined( 'ABSPATH' ) ) {
-    exit;
+	exit;
 }
 
 // ----------------------------------------------------
-// 1. 管理画面の設定とメニューの登録
+// 管理画面設定
 // ----------------------------------------------------
 
 add_action('admin_menu', 'mfn_add_admin_menu');
 add_action('admin_init', 'mfn_settings_init');
 
-/**
- * カスタム設定メニューを「設定」に追加
- */
 function mfn_add_admin_menu() {
-    add_options_page(
-        esc_html__('ファイルリネーム設定', 'move-file-name'),
-        esc_html__('ファイルリネーム', 'move-file-name'),
-        'manage_options',
-        'mfn-settings-page', // 設定ページのスラッグ
-        'mfn_settings_page_callback'
-    );
+	add_options_page(
+		esc_html__('ファイルリネーム設定', 'move-file-name'),
+		esc_html__('ファイルリネーム', 'move-file-name'),
+		'manage_options',
+		'mfn-settings-page',
+		'mfn_settings_page_callback'
+	);
 }
 
-/**
- * 設定ページのコンテンツを表示
- */
 function mfn_settings_page_callback() {
-    // ユーザーに権限があるか確認
-    if (!current_user_can('manage_options')) {
-        return;
-    }
-    ?>
-    <div class="wrap">
-        <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
-        <form action="options.php" method="post">
-            <?php
-            // 設定グループ (mfn_options_group) の設定
-            settings_fields('mfn_options_group');
-            // セクションとフィールドの表示
-            do_settings_sections('mfn-settings-page');
-            // 保存ボタン
-            submit_button(esc_html__('設定を保存', 'move-file-name'));
-            ?>
-        </form>
-    </div>
-    <?php
+	if ( ! current_user_can('manage_options') ) {
+		return;
+	}
+	?>
+	<div class="wrap">
+		<h1><?php echo esc_html( get_admin_page_title() ); ?></h1>
+		<form action="options.php" method="post">
+			<?php
+			settings_fields('mfn_options_group');
+			do_settings_sections('mfn-settings-page');
+			submit_button(esc_html__('設定を保存', 'move-file-name'));
+			?>
+		</form>
+	</div>
+	<?php
 }
 
-/**
- * 設定とフィールドを登録
- */
 function mfn_settings_init() {
-    $option_enabled        = 'mfn_enable_rename';
-    $option_format         = 'mfn_rename_format';
-    $option_forbidden      = 'mfn_forbidden_extensions';
+	register_setting('mfn_options_group', 'mfn_enable_rename', [
+		'default' => 1,
+		'type' => 'boolean',
+		'sanitize_callback' => 'intval',
+	]);
 
-    // 1. リネーム有効/無効のオプションを登録
-    register_setting('mfn_options_group', $option_enabled, array(
-        'default'             => 1, // デフォルト値はオン (1)
-        'type'                => 'boolean',
-        'sanitize_callback'   => 'intval',
-        'show_in_rest'        => false,
-    ));
+	register_setting('mfn_options_group', 'mfn_rename_format', [
+		'default' => 'Ymd_His_',
+		'type' => 'string',
+		'sanitize_callback' => 'sanitize_text_field',
+	]);
 
-    // 2. ファイル名フォーマットのオプションを登録
-    register_setting('mfn_options_group', $option_format, array(
-        'default'             => 'Ymd_His_', // デフォルト値: 例: 20251011_182800_
-        'type'                => 'string',
-        'sanitize_callback'   => 'sanitize_text_field', // テキストフィールドのサニタイズ
-        'show_in_rest'        => false,
-    ));
+	register_setting('mfn_options_group', 'mfn_forbidden_extensions', [
+		'default' => 'exe, php, phtml, html, shtml, js',
+		'type' => 'string',
+		'sanitize_callback' => 'mfn_sanitize_forbidden_extensions',
+	]);
 
-    // 3. 禁止拡張子のオプションを登録
-    register_setting('mfn_options_group', $option_forbidden, array(
-        // 一般的に危険な拡張子をデフォルトで設定
-        'default'             => 'exe, php, phtml, html, shtml, js', 
-        'type'                => 'string',
-        'sanitize_callback'   => 'mfn_sanitize_forbidden_extensions', // カスタムサニタイズ
-        'show_in_rest'        => false,
-    ));
+	register_setting('mfn_options_group', 'mfn_enable_base64', [
+		'default' => 0,
+		'type' => 'boolean',
+		'sanitize_callback' => 'intval',
+	]);
 
+	register_setting('mfn_options_group', 'mfn_base64_length', [
+		'default' => 16,
+		'type' => 'integer',
+		'sanitize_callback' => 'absint',
+	]);
 
-    // 設定セクションを登録
-    add_settings_section(
-        'mfn_main_section',
-        esc_html__('アップロードファイル名強制リネーム設定', 'move-file-name'),
-        'mfn_section_callback',
-        'mfn-settings-page'
-    );
+	register_setting('mfn_options_group', 'mfn_slug_format', [
+		'default' => 'media-%Y%m%d-%H%M%S',
+		'type' => 'string',
+		'sanitize_callback' => 'sanitize_text_field',
+	]);
 
-    // 設定フィールド (チェックボックス) を登録
-    add_settings_field(
-        $option_enabled,
-        esc_html__('リネームを強制する', 'move-file-name'),
-        'mfn_toggle_callback',
-        'mfn-settings-page',
-        'mfn_main_section',
-        array('label_for' => $option_enabled)
-    );
+	add_settings_section(
+		'mfn_main_section',
+		esc_html__('アップロードファイル名強制リネーム設定', 'move-file-name'),
+		'mfn_section_callback',
+		'mfn-settings-page'
+	);
 
-    // 設定フィールド (フォーマット入力) を登録
-    add_settings_field(
-        $option_format,
-        esc_html__('リネーム形式', 'move-file-name'),
-        'mfn_format_callback',
-        'mfn-settings-page',
-        'mfn_main_section',
-        array('label_for' => $option_format)
-    );
-    
-    // 設定フィールド (禁止拡張子入力) を登録
-    add_settings_field(
-        $option_forbidden,
-        esc_html__('禁止拡張子 (アップロードブロック)', 'move-file-name'),
-        'mfn_forbidden_callback',
-        'mfn-settings-page',
-        'mfn_main_section',
-        array('label_for' => $option_forbidden)
-    );
+	add_settings_field(
+		'mfn_enable_rename',
+		esc_html__('リネームを強制する', 'move-file-name'),
+		'mfn_toggle_callback',
+		'mfn-settings-page',
+		'mfn_main_section'
+	);
+
+	add_settings_field(
+		'mfn_rename_format',
+		esc_html__('リネーム形式', 'move-file-name'),
+		'mfn_format_callback',
+		'mfn-settings-page',
+		'mfn_main_section'
+	);
+
+	add_settings_field(
+		'mfn_forbidden_extensions',
+		esc_html__('禁止拡張子', 'move-file-name'),
+		'mfn_forbidden_callback',
+		'mfn-settings-page',
+		'mfn_main_section'
+	);
+
+	add_settings_field(
+		'mfn_enable_base64',
+		esc_html__('Base64付与を有効にする', 'move-file-name'),
+		'mfn_base64_toggle_callback',
+		'mfn-settings-page',
+		'mfn_main_section'
+	);
+
+	add_settings_field(
+		'mfn_base64_length',
+		esc_html__('Base64文字列の長さ', 'move-file-name'),
+		'mfn_base64_length_callback',
+		'mfn-settings-page',
+		'mfn_main_section'
+	);
 }
 
-/**
- * 禁止拡張子リストをサニタイズするカスタムコールバック
- * カンマ区切りリストを受け取り、安全な小文字の拡張子リストに整形する。
- * @param string $input 入力値
- * @return string サニタイズされた値
- */
-function mfn_sanitize_forbidden_extensions($input) {
-    // 入力を小文字に変換
-    $input = strtolower($input);
-    // カンマ、スペース、改行などを区切り文字として分割
-    $extensions = array_map('trim', explode(',', $input));
-    
-    $sanitized_extensions = array_map(function($ext) {
-        // 拡張子として適切な文字（アルファベット、数字）のみを許可し、それ以外を除去
-        return preg_replace('/[^a-z0-9]/', '', $ext);
-    }, $extensions);
-
-    // 空の要素を取り除き、カンマとスペース区切りで戻す
-    return implode(', ', array_filter($sanitized_extensions));
-}
-
-/**
- * 設定セクションの説明を表示
- */
 function mfn_section_callback() {
-    echo '<p>' . esc_html__('ファイルをアップロードする際に、ファイル名をユニークなIDに強制的にリネームするかどうかと、その命名規則を設定します。デフォルトはオンです。リネームが有効な場合、メディアの「名前」（タイトル）も自動で匿名化されます。', 'move-file-name') . '</p>';
+	echo '<p>' . esc_html__('アップロード時のファイル名とスラッグ(post_name)の匿名化設定を行います。', 'move-file-name') . '</p>';
 }
 
-/**
- * 有効/無効チェックボックスのHTML
- */
 function mfn_toggle_callback() {
-    $option_name = 'mfn_enable_rename';
-    $is_enabled = get_option($option_name, 1);
-    ?>
-    <input type="checkbox" name="<?php echo esc_attr($option_name); ?>" id="<?php echo esc_attr($option_name); ?>" value="1" <?php checked(1, $is_enabled); ?>>
-    <label for="<?php echo esc_attr($option_name); ?>">
-        <?php esc_html_e('オンにすると、ファイル名はアップロード時に指定された形式に置き換えられ、メディアの「名前」も匿名化されます。', 'move-file-name'); ?>
-    </label>
-    <?php
+	$is_enabled = get_option('mfn_enable_rename', 1);
+	?>
+	<input type="checkbox" name="mfn_enable_rename" value="1" <?php checked(1, $is_enabled); ?>>
+	<label><?php esc_html_e('オンにすると、アップロード時にファイル名を強制的にリネームします。', 'move-file-name'); ?></label>
+	<?php
 }
 
-/**
- * テキストフィールド (リネーム形式) の表示
- */
 function mfn_format_callback() {
-    $option_name = 'mfn_rename_format';
-    $format = get_option($option_name, 'Ymd_His_');
-    ?>
-    <input type="text" name="<?php echo esc_attr($option_name); ?>" id="<?php echo esc_attr($option_name); ?>" value="<?php echo esc_attr($format); ?>" class="regular-text">
-    <p class="description">
-        <?php esc_html_e('リネーム後のファイル名の接頭辞に使用する形式を', 'move-file-name'); ?>**PHPのdate()関数**<?php esc_html_e('の書式で指定します。例:', 'move-file-name'); ?> <code>Y-m-d-U-</code>
-        <br>
-        <?php esc_html_e('ファイル名はこの接頭辞の後にユニークIDが追加されます。（例:', 'move-file-name'); ?> <code><?php echo esc_html(gmdate($format)); ?>...</code>）
-    </p>
-    <?php
+	$format = get_option('mfn_rename_format', 'Ymd_His_');
+	?>
+	<input type="text" name="mfn_rename_format" value="<?php echo esc_attr($format); ?>" class="regular-text">
+	<p class="description"><?php esc_html_e('PHPのdate()関数形式で指定します。', 'move-file-name'); ?></p>
+	<?php
 }
 
-/**
- * テキストフィールド (禁止拡張子) の表示
- */
 function mfn_forbidden_callback() {
-    $option_name = 'mfn_forbidden_extensions';
-    $forbidden_list = get_option($option_name, 'exe, php, phtml, html, shtml, js');
-    ?>
-    <input type="text" name="<?php echo esc_attr($option_name); ?>" id="<?php echo esc_attr($option_name); ?>" value="<?php echo esc_attr($forbidden_list); ?>" class="regular-text large-text">
-    <p class="description">
-        <?php esc_html_e('アップロードを明示的に禁止する拡張子をカンマ区切りで入力してください。', 'move-file-name'); ?>
-        <br>
-        <?php esc_html_e('デフォルトのリスト: ', 'move-file-name'); ?> <code>exe, php, phtml, html, shtml, js</code>
-    </p>
-    <?php
+	$forbidden_list = get_option('mfn_forbidden_extensions', 'exe, php, phtml, html, shtml, js');
+	?>
+	<input type="text" name="mfn_forbidden_extensions" value="<?php echo esc_attr($forbidden_list); ?>" class="regular-text large-text">
+	<p class="description"><?php esc_html_e('アップロード禁止拡張子をカンマ区切りで指定します。', 'move-file-name'); ?></p>
+	<?php
 }
 
+function mfn_base64_toggle_callback() {
+	$enable_base64 = get_option('mfn_enable_base64', 0);
+	?>
+	<input type="checkbox" name="mfn_enable_base64" value="1" <?php checked(1, $enable_base64); ?>>
+	<label><?php esc_html_e('オンにするとファイル名末尾にBase64文字列を付与します。', 'move-file-name'); ?></label>
+	<?php
+}
+
+function mfn_base64_length_callback() {
+	$length = get_option('mfn_base64_length', 16);
+	?>
+	<select name="mfn_base64_length">
+		<option value="16" <?php selected($length, 16); ?>>16</option>
+		<option value="32" <?php selected($length, 32); ?>>32</option>
+	</select>
+	<p class="description"><?php esc_html_e('付与するBase64文字列の長さを指定します。', 'move-file-name'); ?></p>
+	<?php
+}
 
 // ----------------------------------------------------
-// 2. コアのファイルリネームロジック
+// ファイル名リネームロジック
 // ----------------------------------------------------
 
 add_filter('wp_handle_upload_prefilter', 'mfn_force_rename_uploaded_file');
 
-/**
- * アップロードされるファイルのファイル名を強制的にリネームする
- *
- * 設定がオンの場合のみ実行されます。
- * @param array $file アップロードされるファイルに関するデータ。
- * @return array 変更されたファイルデータ、またはエラー情報を含むデータ。
- */
 function mfn_force_rename_uploaded_file($file) {
-    $option_enabled = 'mfn_enable_rename';
-    $option_format = 'mfn_rename_format';
+	if ( ! get_option('mfn_enable_rename', 1) ) {
+		return $file;
+	}
 
-    // 1. 設定を取得。デフォルトはオン(1)
-    $is_enabled = (int) get_option($option_enabled, 1);
 
-    // 2. 設定がオフの場合は処理をスキップ
-    if (!$is_enabled) {
-        return $file;
-    }
+	$info = pathinfo($file['name']);
+	$ext  = isset($info['extension']) ? strtolower($info['extension']) : '';
 
-    // 3. ファイル名と拡張子を取得
-    $info = pathinfo($file['name']);
-    // 拡張子を小文字で取得 (チェック用)
-    $ext = isset($info['extension']) ? strtolower($info['extension']) : ''; 
+	if ( 'zip' === $ext ) {
+		return $file;
+	}
 
-    // --- プラグイン/テーマアップロード時のリネーム禁止 ---
-    // 拡張子が'zip'の場合は、プラグインやテーマのインストールとみなし、リネームをスキップ
-    if ( 'zip' === $ext ) {
-        return $file;
-    }
-    // --- プラグイン/テーマアップロード時のリネーム禁止 (ここまで) ---
+	$forbidden_list_string = get_option('mfn_forbidden_extensions', 'exe, php, phtml, html, shtml, js');
+	$forbidden_extensions  = array_map('trim', explode(',', strtolower($forbidden_list_string)));
 
-    // --- 禁止拡張子のチェック ---
-    $forbidden_list_string = get_option('mfn_forbidden_extensions', 'exe, php, phtml, html, shtml, js');
-    $forbidden_extensions = array_map('trim', explode(',', strtolower($forbidden_list_string)));
-    
-    // 拡張子チェック
-    if ($ext && in_array($ext, $forbidden_extensions, true)) {
-        // アップロードをブロックし、エラーメッセージを返す
-        /* translators: %s: Forbidden file extension (e.g., 'exe') */
-        $file['error'] = sprintf( esc_html__('セキュリティ上の理由により、ファイル拡張子「.%s」のアップロードは禁止されています。', 'move-file-name'), $ext );
-        // エラー情報を持った $file を返すことで、WordPressのアップロード処理が中断されます
-        return $file;
-    }
-    // --- 禁止拡張子のチェック (ここまで) ---
+	if ( $ext && in_array($ext, $forbidden_extensions, true) ) {
+		$file['error'] = sprintf(
+			// translators: %s is the forbidden file extension (e.g., 'exe')
+			esc_html__('セキュリティ上の理由により、ファイル拡張子「.%s」のアップロードは禁止されています。', 'move-file-name'),
+			$ext
+		);
+		return $file;
+	}
 
-    // 4. カスタムリネーム形式を取得。デフォルト値は 'Ymd_His_'
-    $format_string = get_option($option_format, 'Ymd_His_');
+	$format_string = get_option('mfn_rename_format', 'Ymd_His_');
+	$ext_with_dot  = $ext ? '.' . $ext : '';
+	$date_prefix   = gmdate($format_string);
 
-    // 5. 新しいユニークなファイル名を生成
-    // 拡張子が存在する場合のみドットを付ける (リネーム用)
-    $ext_with_dot = $ext ? '.' . $ext : '';
-    
-    // タイムゾーン設定の影響を受けない gmdate() を使用して、常に UTC に基づいた命名を行う
-    $date_prefix = gmdate($format_string);
-    // gmdate() + uniqid() を組み合わせて衝突の可能性を極限まで低くする
-    $random = bin2hex(random_bytes(3)); // 6桁程度の安全なランダム文字列
-    $new_filename_base = $date_prefix . uniqid('') . '_' . $random;
-    $new_filename = $new_filename_base . $ext_with_dot;
+	$random = bin2hex(random_bytes(3));
 
-    // 6. ファイル名を置き換え
-    $file['name'] = $new_filename;
+	$enable_base64  = (int) get_option('mfn_enable_base64', 0);
+	$base64_length  = (int) get_option('mfn_base64_length', 16);
+	if ( $enable_base64 ) {
+		$b64 = substr(str_replace(['+', '/', '='], '', base64_encode(random_bytes($base64_length))), 0, $base64_length);
+		$b64 = strtolower($b64);
+		$random .= '_' . $b64;
+	}
 
-    return $file;
+	$new_filename_base = $date_prefix . uniqid('') . '_' . $random;
+	$file['name']      = $new_filename_base . $ext_with_dot;
+
+	return $file;
 }
 
-// --------------------------------------------------------
-// 3. メディアのタイトル (post_title) をリネームするロジック
-// --------------------------------------------------------
+// ----------------------------------------------------
+// メディアタイトルとスラッグ匿名化
+// ----------------------------------------------------
 
 add_filter('wp_insert_post_data', 'mfn_sanitize_attachment_title', 10, 2);
 
-/**
- * アップロードされたメディアのタイトル (post_title) をサニタイズする
- *
- * ファイル名と同じく、アップロード時に設定される post_title からも
- * 個人情報や元のファイル名に関する情報を排除します。
- * post_name (スラッグ) もサニタイズします。
- *
- * @param array $data 投稿データ配列。
- * @param array $postarr 投稿データ。
- * @return array 変更された投稿データ配列。
- */
 function mfn_sanitize_attachment_title($data, $postarr) {
-    // 添付ファイル (attachment) のみが対象
-    if ('attachment' !== $data['post_type']) {
-        return $data;
-    }
+	if ( 'attachment' !== $data['post_type'] ) {
+		return $data;
+	}
+	if ( ! get_option('mfn_enable_rename', 1) ) {
+		return $data;
+	}
 
-    // ファイル名リネーム設定が有効な場合のみ実行
-    $is_enabled = (int) get_option('mfn_enable_rename', 1);
-    if (!$is_enabled) {
-        return $data;
-    }
+	// translators: %s is the localized current date and time (e.g., "2025-10-17 15:32:00")
+	$new_title_format = esc_html__('メディアファイル %s', 'move-file-name');
+	$date_string      = date_i18n('Y-m-d H:i:s', current_time('timestamp', 0));
+	$new_title        = sprintf($new_title_format, $date_string);
 
-    // post_title を新しい匿名化されたタイトルに置き換える
-    // このタイトルは、メディアライブラリの「名前」として表示されます。
-    // 例: "メディアファイル 2025-10-11 22:35"
-    /* translators: %s: Current date and time (e.g., 2025-10-11 22:35:00) */
-    $new_title_format = esc_html__('メディアファイル %s', 'move-file-name');
-    
-    // 現在のローカライズされた日時を使用
-    $date_string = date_i18n( 'Y-m-d H:i:s', current_time( 'timestamp', 0 ) );
+	$data['post_title'] = $new_title;
 
-    // 新しいタイトルを構築
-    $new_title = sprintf( $new_title_format, $date_string );
+	$slug_format = get_option('mfn_slug_format', 'media-%Y%m%d-%H%M%S');
+	$slug_string = gmdate(str_replace('%', '', $slug_format));
+	$data['post_name']  = sanitize_title($slug_string);
 
-    // post_title を上書き（メディアライブラリの「名前」）
-    $data['post_title'] = $new_title;
-    
-    // post_name (スラッグ) も上書きして、元のファイル名がスラッグとして残るのを防ぐ
-    $data['post_name'] = sanitize_title( $new_title );
-
-    return $data;
+	return $data;
 }
 
+// ----------------------------------------------------
+// アンインストール処理
+// ----------------------------------------------------
 
-// --------------------------------------------------------
-// 4. アンインストール時の処理 (クリーンアップ)
-// --------------------------------------------------------
-
-/**
- * プラグイン削除時にデータベースのオプションをクリーンアップする
- */
 function mfn_uninstall_cleanup() {
-    delete_option( 'mfn_enable_rename' );
-    delete_option( 'mfn_rename_format' );
-    delete_option( 'mfn_forbidden_extensions' ); // 禁止拡張子オプションの削除
+	delete_option('mfn_enable_rename');
+	delete_option('mfn_rename_format');
+	delete_option('mfn_forbidden_extensions');
+	delete_option('mfn_enable_base64');
+	delete_option('mfn_base64_length');
+	delete_option('mfn_slug_format');
 }
-// プラグイン削除時に実行する関数を登録
-register_uninstall_hook( __FILE__, 'mfn_uninstall_cleanup' );
+register_uninstall_hook(__FILE__, 'mfn_uninstall_cleanup');
+
+// ----------------------------------------------------
+// サニタイズ関数
+// ----------------------------------------------------
+
+function mfn_sanitize_forbidden_extensions($input) {
+	$input = strtolower($input);
+	$extensions = array_map('trim', explode(',', $input));
+	$sanitized_extensions = array_map(function($ext) {
+		return preg_replace('/[^a-z0-9]/', '', $ext);
+	}, $extensions);
+	return implode(', ', array_filter($sanitized_extensions));
+}

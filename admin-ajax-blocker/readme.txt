@@ -1,8 +1,8 @@
 === Admin Ajax Blocker ===
-Plugin Name: Admin Ajax Blocker
+Plugin Name: Admin Ajax Blocker(dev ver)
 Description: 非ログインユーザーによる「wp-admin/admin-ajax.php」へのアクセスをグローバルにブロックし、サーバー負荷とセキュリティリスクを軽減します。
 Plugin URI: https://p-fox.jp/
-Stable tag: 1.0
+Stable tag: 0.9
 Author: Red Fox(team Red Fox)
 Author URI: https://p-fox.jp/
 Contributors: teamredfox
@@ -73,4 +73,5 @@ HTTPステータスコード、JSONエラーコード、JSONエラーメッセ�
 == Upgrade Notice ==
 
 = 1.0.0 =
+
 Initial release. No special upgrade notice is needed for this version.

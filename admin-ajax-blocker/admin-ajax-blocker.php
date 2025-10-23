@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name: Admin Ajax Blocker
+ * Plugin Name: Admin Ajax Blocker(dev ver)
  * Description: 非ログインユーザーによる「wp-admin/admin-ajax.php」へのアクセスをグローバルにブロックします。エラーコードやメッセージ、HTTPステータスコードを設定画面で自由にカスタマイズできます。
  * Plugin URI: https://p-fox.jp/
- * Version: 1.0
+ * Version: 0.9
  * Author: Red Fox(team Red Fox)
  * Author URI: https://p-fox.jp/
  * License: GPLv2 or later

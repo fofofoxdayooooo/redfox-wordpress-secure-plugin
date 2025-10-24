@@ -37,37 +37,39 @@ function apg_get_option( $key = null, $default = null ) {
  * ========================================================= */
 function apg_log( $msg, $force = false ) {
 	// =========================================================
-	// ガード機能・ログ無効設定を確認
+	// ログ・ガード設定確認
 	// =========================================================
-	if ( ! apg_get_option( 'enable_guard' ) && ! $force ) {
+	$opts = apg_get_option();
+	$enable_guard    = ! empty( $opts['enable_guard'] );
+	$disable_logging = ! empty( $opts['disable_logging'] );
+
+	// ログ無効の場合は完全停止
+	if ( $disable_logging && ! $force ) {
 		return;
 	}
 
-	// disable_logging=1 の場合は完全無効化（フォース出力も禁止）
-	if ( (int) apg_get_option( 'disable_logging' ) === 1 ) {
+	// ガード自体が無効の場合も停止
+	if ( ! $enable_guard && ! $force ) {
 		return;
 	}
 
+	// =========================================================
+	// ここから先は実際に書き込みを行う場合のみ
+	// =========================================================
 	$base_dir   = trailingslashit( WP_CONTENT_DIR );
-	$custom_dir = trim( apg_get_option( 'log_dir', '' ) );
-	$target_dir = $base_dir . 'apg-logs/'; // デフォルトフォールバック
+	$custom_dir = trim( $opts['log_dir'] ?? '' );
+	$target_dir = $base_dir . 'apg-logs/'; // デフォルト
 
-	// =========================================================
-	// ディレクトリ名の安全検証（空白・不正文字含めた場合は自動フォールバック）
-	// =========================================================
 	$invalid = false;
 	if ( $custom_dir !== '' ) {
-		if ( preg_match( '/[^a-zA-Z0-9_\-\/]/', $custom_dir ) ) {
+		if (
+			preg_match( '/[^a-zA-Z0-9_\-\/]/', $custom_dir ) ||
+			strpos( $custom_dir, '..' ) !== false ||
+			str_starts_with( $custom_dir, '/' ) ||
+			preg_match( '/\s/', $custom_dir )
+		) {
 			$invalid = true;
-		}
-		if ( strpos( $custom_dir, '..' ) !== false || str_starts_with( $custom_dir, '/' ) ) {
-			$invalid = true;
-		}
-		if ( preg_match( '/\s/', $custom_dir ) ) {
-			$invalid = true;
-		}
-
-		if ( ! $invalid ) {
+		} else {
 			$resolved = realpath( $base_dir . $custom_dir );
 			if ( $resolved === false || strpos( $resolved, realpath( $base_dir ) ) !== 0 ) {
 				$invalid = true;
@@ -77,14 +79,10 @@ function apg_log( $msg, $force = false ) {
 		}
 	}
 
-	// フォールバック（安全）
 	if ( $invalid ) {
 		$target_dir = $base_dir . 'apg-logs-fallback/';
 	}
 
-	// =========================================================
-	// ディレクトリ存在・パーミッション確認
-	// =========================================================
 	if ( ! file_exists( $target_dir ) ) {
 		wp_mkdir_p( $target_dir );
 	}
@@ -99,20 +97,11 @@ function apg_log( $msg, $force = false ) {
 		return;
 	}
 
-	// =========================================================
-	// 書き込み処理
-	// =========================================================
 	$file = $target_dir . 'apg-log.log';
 	$time = gmdate( 'Y-m-d H:i:s' );
 	$line = sprintf( "[%s] %s\n", $time, $msg );
 
-	// ここでは wp_trigger_error() も完全に抑止
-	if ( $wp_filesystem->exists( $file ) ) {
-		$existing = $wp_filesystem->get_contents( $file );
-		$wp_filesystem->put_contents( $file, $existing . $line, FS_CHMOD_FILE );
-	} else {
-		$wp_filesystem->put_contents( $file, $line, FS_CHMOD_FILE );
-	}
+	$wp_filesystem->put_contents( $file, $line, FS_CHMOD_FILE );
 }
 
 /* =========================================================

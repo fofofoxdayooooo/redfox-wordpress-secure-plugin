@@ -26,7 +26,6 @@ class Admin_Whitelist {
 	private $restricted_roles = array( 'administrator','editor','author','contributor' );
 
 	public function __construct() {
-		// 権限監視・昇格防止
 		add_filter( 'user_has_cap', array( $this, 'filter_user_has_cap' ), 10, 4 );
 		add_action( 'init', array( $this, 'strict_mode_demotion' ) );
 		add_action( 'init', array( $this, 'verify_roles_integrity' ), 2 );
@@ -36,18 +35,14 @@ class Admin_Whitelist {
 		add_action( 'set_user_role', array( $this, 'on_role_change_detected' ), 10, 3 );
 		add_filter( 'rest_pre_dispatch', array( $this, 'rest_pre_dispatch' ), 10, 3 );
 
-		// 設定画面
 		add_action( 'admin_menu', array( $this, 'add_settings_page' ) );
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
 		add_action( 'admin_post_awh_remove_user', array( $this, 'handle_whitelist_removal_action' ) );
 
-		// ログイン時チェック
 		add_action( 'wp_login', array( $this, 'on_login_check' ), 5, 2 );
 
-		// 有効化・アンインストール
 		register_activation_hook( __FILE__, array( $this, 'on_activate' ) );
 		register_uninstall_hook( __FILE__, array( 'Admin_Whitelist', 'on_uninstall' ) );
-
 	}
 
 	/* ======================================================

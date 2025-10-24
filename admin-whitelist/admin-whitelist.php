@@ -16,7 +16,6 @@ class Admin_Whitelist {
 	const OPTION_WHITELIST   = 'whitelist_user_ids';
 	const OPTION_MODE        = 'mode';
 	const OPTION_GRANDFATHER = 'grandfather_ids';
-	const OPTION_TABLE_NAME  = 'awh_table_suffix';
 
 	private $admin_caps = array(
 		'activate_plugins','update_plugins','delete_plugins','install_plugins',
@@ -49,8 +48,6 @@ class Admin_Whitelist {
 		register_activation_hook( __FILE__, array( $this, 'on_activate' ) );
 		register_uninstall_hook( __FILE__, array( 'Admin_Whitelist', 'on_uninstall' ) );
 
-		// テーブル作成
-		add_action( 'plugins_loaded', array( $this, 'maybe_create_table' ) );
 	}
 
 	/* ======================================================
@@ -67,45 +64,13 @@ class Admin_Whitelist {
 		);
 		update_option( self::OPTION_KEY, $opts, false );
 
-		if ( ! get_option( self::OPTION_TABLE_NAME ) ) {
-			update_option( self::OPTION_TABLE_NAME, 'admin_whitelist' );
-		}
 
-		$this->maybe_create_table();
 	}
 
 	public static function on_uninstall() {
 		delete_option( self::OPTION_KEY );
-		delete_option( self::OPTION_TABLE_NAME );
 	}
 
-	/* ======================================================
-	 * テーブル作成（dbDelta使用）
-	 * ====================================================== */
-	public function maybe_create_table() {
-		global $wpdb;
-		$suffix          = sanitize_key( get_option( self::OPTION_TABLE_NAME, 'admin_whitelist' ) );
-		$table_name      = $wpdb->prefix . $suffix;
-		$charset_collate = $wpdb->get_charset_collate();
-
-		$sql = "CREATE TABLE IF NOT EXISTS `$table_name` (
-			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-			user_id bigint(20) unsigned NOT NULL,
-			role varchar(50) NOT NULL,
-			status varchar(20) NOT NULL DEFAULT 'active',
-			added datetime DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (id)
-		) $charset_collate;";
-
-		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-		dbDelta( $sql );
-	}
-
-	private function get_table_name() {
-		global $wpdb;
-		$suffix = sanitize_key( get_option( self::OPTION_TABLE_NAME, 'admin_whitelist' ) );
-		return $wpdb->prefix . $suffix;
-	}
 
 	/* ======================================================
 	 * ログイン時降格チェック
@@ -214,27 +179,12 @@ class Admin_Whitelist {
 
 	public function register_settings() {
 		register_setting( 'admin_whitelist_group', self::OPTION_KEY, array( $this, 'sanitize_settings' ) );
-		register_setting(
-			'admin_whitelist_group',
-			self::OPTION_TABLE_NAME,
-			array(
-				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_key',
-				'default'           => 'admin_whitelist',
-			)
-		);
 
 		add_settings_section( 'awh_main_section', '基本設定', null, 'admin-whitelist' );
 		add_settings_field( self::OPTION_MODE, '動作モード', array( $this, 'render_mode_field' ), 'admin-whitelist', 'awh_main_section' );
 		add_settings_field( self::OPTION_WHITELIST, 'ホワイトリスト登録ユーザー', array( $this, 'render_whitelist_field' ), 'admin-whitelist', 'awh_main_section' );
-		add_settings_field( self::OPTION_TABLE_NAME, 'テーブル名サフィックス', array( $this, 'render_table_suffix_field' ), 'admin-whitelist', 'awh_main_section' );
 	}
 
-	public function render_table_suffix_field() {
-		$val = sanitize_key( get_option( self::OPTION_TABLE_NAME, 'admin_whitelist' ) );
-		echo '<input type="text" name="' . esc_attr( self::OPTION_TABLE_NAME ) . '" value="' . esc_attr( $val ) . '" />';
-		echo '<p class="description">wp_などの接頭辞に続く部分を指定（英数字・_のみ）。</p>';
-	}
 
 	public function sanitize_settings( $input ) {
 		$output     = array();

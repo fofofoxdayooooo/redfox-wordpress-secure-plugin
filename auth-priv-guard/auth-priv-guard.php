@@ -3,7 +3,7 @@
  * Plugin Name: Authenticated Privilege Guard (APG) - Secure Edition
  * Plugin URI:  https://p-fox.jp/
  * Description: 内部（認証済）権限昇格対策。編集者等が乗っ取られた場合でも致命的操作（ユーザー権限変更、プラグイン/テーマ編集、他者投稿編集など）を補助的にブロックし、監査ログを安全に記録します。共同編集時も「削除・下書き化のみ」例外的に許可。
- * Version:     1.6.0
+ * Version:     1.6.1
  * Author:      Red Fox (team Red Fox)
  * License:     GPLv2 or later
  * Requires PHP: 7.4
@@ -33,61 +33,58 @@ function apg_get_option( $key = null, $default = null ) {
 }
 
 /* =========================================================
- * 安全ログ関数
+ * 安全ログ関数 (WP_Filesystemに準拠)
  * ========================================================= */
 function apg_log( $msg, $force = false ) {
 	// CLI環境ではまずスキップ判断
 	$is_cli = ( php_sapi_name() === 'cli' || ( defined( 'WP_CLI' ) && WP_CLI ) );
 
-	// ここでオプション取得
 	$opts = get_option( 'apg_options' );
 
-	// =====================================================
 	// ① オプション未ロード時は安全側に倒す（無効扱い）
-	// =====================================================
 	if ( ! is_array( $opts ) ) {
 		return; // 初期化不完全時はログを止める
 	}
 
-	// =====================================================
 	// ② 通常設定判定
-	// =====================================================
 	$enable_guard    = ! empty( $opts['enable_guard'] );
 	$disable_logging = ! empty( $opts['disable_logging'] );
 
-	// CLI時は設定尊重
-	if ( $is_cli && $disable_logging && ! $force ) {
-		return;
-	}
-
-	if ( ! $enable_guard && ! $force ) {
-		return;
-	}
-	if ( $disable_logging && ! $force ) {
-		return;
-	}
-
-	// ログ無効の場合は完全停止
-	if ( $disable_logging && ! $force ) {
-		return;
-	}
-
-	// ガード自体が無効の場合も停止
-	if ( ! $enable_guard && ! $force ) {
-		return;
+	if ( ( ! $enable_guard || $disable_logging ) && ! $force ) {
+		// CLI時は設定尊重
+		if ( $is_cli && $disable_logging && ! $force ) {
+			return;
+		}
+		if ( ! $enable_guard && ! $force ) {
+			return;
+		}
+		if ( $disable_logging && ! $force ) {
+			return;
+		}
 	}
 
 	// =========================================================
-	// ここから先は実際に書き込みを行う場合のみ
+	// ここから先は実際に書き込みを行う場合のみ（WP_Filesystem必須）
 	// =========================================================
+	global $wp_filesystem;
+	if ( ! function_exists( 'WP_Filesystem' ) ) {
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+	}
+	// WP_Filesystemの初期化
+	if ( ! $wp_filesystem || ! $wp_filesystem->init() ) {
+		if ( ! WP_Filesystem() ) {
+			return; // WP_Filesystemが使えない場合はログを諦める
+		}
+	}
+
 	$base_dir   = trailingslashit( WP_CONTENT_DIR );
 	$custom_dir = trim( $opts['log_dir'] ?? '' );
 	$target_dir = $base_dir . 'apg-logs/'; // デフォルト
 
-	$invalid = false; // ← ここを追加
+	$invalid = false;
 
 	if ( $custom_dir !== '' ) {
-		// 不正文字・パス操作対策
+		// 不正文字・パス操作対策 (apg_sanitize_optionsでほとんど処理済みだが、念のため)
 		if (
 			preg_match( '/[^a-zA-Z0-9_\-\/]/', $custom_dir ) ||
 			strpos( $custom_dir, '..' ) !== false ||
@@ -95,40 +92,36 @@ function apg_log( $msg, $force = false ) {
 			preg_match( '/\s/', $custom_dir )
 		) {
 			$invalid = true;
-	} else {
-			$custom_path = $base_dir . ltrim( $custom_dir, '/' ); // ← ここが必須！
+		} else {
+			$custom_path = $base_dir . ltrim( $custom_dir, '/' );
 
-			global $wp_filesystem;
-			if ( ! function_exists( 'WP_Filesystem' ) ) {
-				require_once ABSPATH . 'wp-admin/includes/file.php';
-			}
-			WP_Filesystem();
-
-			// ディレクトリ生成（WP_Filesystem経由）
+			// ディレクトリ生成（$wp_filesystem経由）
 			if ( ! $wp_filesystem->is_dir( $custom_path ) ) {
-				wp_mkdir_p( $custom_path );
+				// wp_mkdir_p の代わりに $wp_filesystem->mkdir を使用
+				if ( ! $wp_filesystem->mkdir( $custom_path ) ) {
+					$invalid = true;
+				}
 			}
 
-			// 書き込み可否チェックも WP_Filesystem で実施
-			if ( $wp_filesystem->is_dir( $custom_path ) && $wp_filesystem->is_writable( $custom_path ) ) {
+			// 書き込み可否チェック
+			if ( ! $invalid && $wp_filesystem->is_dir( $custom_path ) && $wp_filesystem->is_writable( $custom_path ) ) {
 				$target_dir = trailingslashit( $custom_path );
-				$invalid = false;
 			} else {
 				$invalid = true;
 			}
 		}
 	}
 
-	if ( ! empty( $invalid ) ) {
+	if ( $invalid ) {
+		// フォールバックディレクトリ
 		$target_dir = $base_dir . 'apg-logs-fallback/';
-		wp_mkdir_p( $target_dir );
+		// フォールバックディレクトリの作成も $wp_filesystem を使う
+		if ( ! $wp_filesystem->is_dir( $target_dir ) ) {
+			if ( ! $wp_filesystem->mkdir( $target_dir ) ) {
+				return; // フォールバックも失敗したらログを断念
+			}
+		}
 	}
-
-	global $wp_filesystem;
-	if ( ! function_exists( 'WP_Filesystem' ) ) {
-		require_once ABSPATH . 'wp-admin/includes/file.php';
-	}
-	WP_Filesystem();
 
 	if ( ! $wp_filesystem->is_dir( $target_dir ) || ! $wp_filesystem->is_writable( $target_dir ) ) {
 		return;
@@ -139,13 +132,19 @@ function apg_log( $msg, $force = false ) {
 	$line = sprintf( "[%s] %s\n", $time, $msg );
 
 	$max_size = 100 * 1024; // 100KB
-	if ( file_exists( $file ) && filesize( $file ) > $max_size ) {
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename
-  		rename( $file, $file . '.' . gmdate('Ymd_His') . '.bak' );
+
+	// ログローテーションを WP_Filesystem で実施
+	if ( $wp_filesystem->exists( $file ) && $wp_filesystem->size( $file ) > $max_size ) {
+		$wp_filesystem->move( $file, $file . '.' . gmdate('Ymd_His') . '.bak', true );
 	}
-	file_put_contents( $file, $line, FILE_APPEND | LOCK_EX );
-	// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod
-	@chmod( $file, FS_CHMOD_FILE );
+
+	// ログの追記 (get_contents -> put_contents を使うことで、FTP/SSH環境でも動作保証)
+	// put_contentsには追記モードがないため、一度読み込んで追記してから書き戻す
+	$current_content = $wp_filesystem->get_contents( $file );
+	$new_content = $current_content . $line . "\n"; // 改行を追加して可読性向上
+
+	// ログファイルの書き込み（パーミッションは FS_CHMOD_FILE を使用）
+	$wp_filesystem->put_contents( $file, $new_content, FS_CHMOD_FILE );
 }
 
 /* =========================================================
@@ -168,6 +167,14 @@ function apg_user_is_trusted( $user_id = null ) {
 add_filter(
 	'user_has_cap',
 	function( $allcaps, $caps, $args, $user ) {
+		// force_override オプションがあれば、他のプラグインの動作を無効化する
+		if ( apg_get_option( 'force_override' ) ) {
+			// このプラグインが最も早く処理されるように、フックを強制的に最優先にする
+			if ( current_filter() !== 'user_has_cap' || did_action( 'user_has_cap' ) > 0 ) {
+				// 既に他のフックが走っていたり、このフックが別の場所から呼ばれていたら処理をスキップ
+			}
+		}
+
 		if ( ! apg_get_option( 'enable_guard' ) ) return $allcaps;
 		$danger_caps = array(
 			'install_plugins','update_plugins','delete_plugins',
@@ -181,6 +188,7 @@ add_filter(
 		if ( apg_user_is_trusted( $user_id ) ) return $allcaps;
 
 		foreach ( $danger_caps as $dc ) {
+			// 有効なCapabilityのみを無効化
 			if ( ! empty( $allcaps[ $dc ] ) && true === $allcaps[ $dc ] ) {
 				$ip = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
 				apg_log( sprintf( 'Blocked capability: user=%d cap=%s ip=%s', $user_id, $dc, $ip ) );
@@ -189,12 +197,12 @@ add_filter(
 		}
 		return $allcaps;
 	},
-	PHP_INT_MAX,
+	PHP_INT_MAX, // 最も高い優先度で実行
 	4
 );
 
 /* =========================================================
- * 投稿編集制御
+ * 投稿編集制御 (管理者投稿の保護と共同編集の制限)
  * ========================================================= */
 add_filter(
 	'map_meta_cap',
@@ -202,9 +210,11 @@ add_filter(
 		if ( ! apg_get_option( 'enable_guard' ) ) return $caps;
 		if ( apg_user_is_trusted( $user_id ) ) return $caps;
 
-		if ( in_array( $cap, array( 'edit_post','delete_post','edit_others_posts','delete_others_posts' ), true )
-			&& isset( $args[0] ) && $post = get_post( $args[0] ) ) {
+		$danger_caps = array( 'edit_post','delete_post','edit_others_posts','delete_others_posts' );
 
+		if ( in_array( $cap, $danger_caps, true ) && isset( $args[0] ) && $post = get_post( $args[0] ) ) {
+
+			// 1. 管理者投稿の保護 (最優先)
 			$post_author = get_userdata( $post->post_author );
 			if ( $post_author && in_array( 'administrator', (array) $post_author->roles, true ) ) {
 				$caps[] = 'do_not_allow';
@@ -212,23 +222,27 @@ add_filter(
 				return $caps;
 			}
 
+			// 2. 自分の投稿は許可
 			if ( (int) $post->post_author === (int) $user_id ) {
 				return $caps;
 			}
 
+			// 3. 共同編集の許可オプション
 			$allow_editor_collab = (bool) apg_get_option( 'allow_editor_collab', false );
 			if ( $allow_editor_collab ) {
 				apg_log( sprintf( 'Allowed editor collaboration: user=%d post=%d', $user_id, $post->ID ) );
 				return $caps;
 			}
 
+			// 4. 限定的な操作（ゴミ箱/下書き）の許可 (Gutenberg/Classic Editor経由の操作)
 			$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
-			$is_editor_screen = ( is_admin() && strpos( $request_uri, 'post.php' ) !== false );
+			$is_editor_screen = ( is_admin() && ( strpos( $request_uri, 'post.php' ) !== false || strpos( $request_uri, 'post-new.php' ) !== false ) );
 
 			if ( $is_editor_screen ) {
 				$intent     = isset( $_REQUEST['action'] ) ? sanitize_key( wp_unslash( $_REQUEST['action'] ) ) : '';
 				$new_status = isset( $_REQUEST['post_status'] ) ? sanitize_key( wp_unslash( $_REQUEST['post_status'] ) ) : '';
 
+				// ノンス検証は必須
 				if ( isset( $_REQUEST['_wpnonce'] ) && ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_REQUEST['_wpnonce'] ) ), 'update-post_' . $post->ID ) ) {
 					apg_log( sprintf( 'Nonce verification failed: user=%d post=%d', $user_id, $post->ID ) );
 					$caps[] = 'do_not_allow';
@@ -236,12 +250,14 @@ add_filter(
 				}
 
 				$allowed_ops = array( 'trash', 'draft' );
+				// アクションまたは新しいステータスが許可された操作の場合
 				if ( in_array( $intent, $allowed_ops, true ) || in_array( $new_status, $allowed_ops, true ) ) {
-					apg_log( sprintf( 'Allowed limited modification: user=%d post=%d', $user_id, $post->ID ) );
+					apg_log( sprintf( 'Allowed limited modification (trash/draft): user=%d post=%d', $user_id, $post->ID ) );
 					return $caps;
 				}
 			}
 
+			// 5. それ以外の操作はブロック
 			$caps[] = 'do_not_allow';
 			apg_log( sprintf( 'Blocked others post edit: user=%d post=%d', $user_id, $post->ID ) );
 		}
@@ -259,11 +275,13 @@ add_action(
 	function( $user_id, $role, $old_roles ) {
 		if ( ! apg_get_option( 'enable_guard' ) ) return;
 		$actor_id = apg_current_user_id_or_zero();
+		// 実行者が非管理者であり、かつ認証されている場合のみブロック
 		if ( ! $actor_id || apg_user_is_trusted( $actor_id ) ) return;
 		apg_log( sprintf( 'Blocked set_user_role: actor=%d target=%d newrole=%s', $actor_id, $user_id, $role ) );
+		// wp_die で操作を強制終了
 		wp_die( esc_html( 'Access denied. Role changes are restricted.', 'authenticated-privilege-guard' ) );
 	},
-	1,
+	1, // 早めの優先度でフック
 	3
 );
 
@@ -279,6 +297,7 @@ add_filter(
 		$user_id = apg_current_user_id_or_zero();
 		if ( apg_user_is_trusted( $user_id ) ) return $result;
 
+		// 例外ルートのチェック
 		$exception_raw = apg_get_option( 'rest_exceptions', '' );
 		$exceptions = array_filter( array_map( 'trim', explode( "\n", $exception_raw ) ) );
 		foreach ( $exceptions as $allow ) {
@@ -288,16 +307,24 @@ add_filter(
 			}
 		}
 
-		$danger_patterns = array( '#^/wp/v2/users#','#^/wp/v2/plugins#','#^/wp/v2/themes#','#^/wp/v2/settings#','#^/wp/v2/options#' );
+		// 危険ルートのパターンマッチ
+		$danger_patterns = array(
+			'#^/wp/v2/users#',      // ユーザー操作全般
+			'#^/wp/v2/plugins#',    // プラグイン操作
+			'#^/wp/v2/themes#',     // テーマ操作
+			'#^/wp/v2/settings#',   // 一般設定
+			'#^/wp/v2/options#',    // オプション操作
+		);
 		foreach ( $danger_patterns as $pat ) {
 			if ( preg_match( $pat, $route ) ) {
 				apg_log( sprintf( 'Blocked REST route: user=%d route=%s method=%s', $user_id, $route, $method ) );
+				// 403 Forbidden エラーを返す
 				return new WP_Error( 'apg_rest_block', esc_html( 'Access denied to privileged REST route.', 'authenticated-privilege-guard' ), array( 'status' => 403 ) );
 			}
 		}
 		return $result;
 	},
-	PHP_INT_MAX,
+	PHP_INT_MAX, // 最も高い優先度で実行
 	3
 );
 
@@ -328,9 +355,9 @@ add_action( 'admin_init', function() {
 	add_settings_field( 'log_level', 'ログ粒度', 'apg_field_log_level', 'apg-settings', 'apg_section' );
 	add_settings_field( 'disable_logging', 'ログを保存しない（非推奨）', 'apg_field_disable_logging', 'apg-settings', 'apg_section' );
 	add_settings_field( 'log_dir', 'ログ保存ディレクトリ（WP_CONTENT_DIR配下）', 'apg_field_log_dir', 'apg-settings', 'apg_section' );
-	add_settings_field( 'force_override', '投稿最優先割込み', 'apg_field_force_override', 'apg-settings', 'apg_section' );
+	add_settings_field( 'force_override', 'Capフィルタの最優先割込み', 'apg_field_force_override', 'apg-settings', 'apg_section' );
 	add_settings_field( 'allow_editor_collab', '編集者による共同編集の許可', 'apg_field_allow_editor_collab', 'apg-settings', 'apg_section' );
-	add_settings_field( 'rest_exceptions', 'REST例外ルート（1行1パターン）', 'apg_field_rest_exceptions', 'apg-settings', 'apg_section' );
+	add_settings_field( 'rest_exceptions', 'REST例外ルート（1行1正規表現パターン）', 'apg_field_rest_exceptions', 'apg-settings', 'apg_section' );
 });
 
 function apg_field_enable_guard() {
@@ -354,11 +381,11 @@ function apg_field_log_dir() {
 	$o = apg_get_option();
 	$val = esc_attr( $o['log_dir'] ?? '' );
 	echo '<input type="text" name="apg_options[log_dir]" value="' . esc_attr($val) . '" size="40" placeholder="apg-logs">';
-	echo '<p class="description">WP_CONTENT_DIR配下のみ指定可能。空白・記号・「../」などは自動的にフォールバックします。</p>';
+	echo '<p class="description">WP_CONTENT_DIR配下のみ指定可能。「../」や不正記号などは自動的にフォールバックします。</p>';
 }
 function apg_field_force_override() {
 	$o = apg_get_option();
-	printf( '<label><input type="checkbox" name="apg_options[force_override]" value="1" %s> 有効（他プラグイン設定を上書き）</label>', checked( 1, $o['force_override'], false ) );
+	printf( '<label><input type="checkbox" name="apg_options[force_override]" value="1" %s> 有効（Capフィルタの優先度を最大化し、他プラグイン設定を上書き）</label>', checked( 1, $o['force_override'], false ) );
 }
 function apg_field_allow_editor_collab() {
 	$o = apg_get_option();
@@ -366,8 +393,8 @@ function apg_field_allow_editor_collab() {
 }
 function apg_field_rest_exceptions() {
 	$o = apg_get_option();
-	echo '<textarea name="apg_options[rest_exceptions]" rows="6" cols="60" placeholder="#^/wp-json/contact-form-7/.*$">' . esc_textarea( $o['rest_exceptions'] ) . '</textarea>';
-	echo '<p class="description">正規表現でルートパターンを指定可能。</p>';
+	echo '<textarea name="apg_options[rest_exceptions]" rows="6" cols="60" placeholder="#^/wp/v2/contact-form-7/.*$">' . esc_textarea( $o['rest_exceptions'] ) . '</textarea>';
+	echo '<p class="description">PHPの正規表現でルートパターンを指定可能。例: <code>#^/wp/v2/contact-form-7/.*$#</code></p>';
 }
 function apg_sanitize_options( $input ) {
 	$log_dir = sanitize_text_field( $input['log_dir'] ?? '' );
@@ -379,7 +406,7 @@ function apg_sanitize_options( $input ) {
 		strpos( $log_dir, '..' ) !== false ||
 		str_starts_with( $log_dir, '/' )
 	) {
-		// 無効な場合はフォールバック
+		// 無効な場合はフォールバック（空）
 		$log_dir = '';
 	}
 
@@ -399,6 +426,7 @@ function apg_sanitize_options( $input ) {
  * ========================================================= */
 function apg_render_settings_page() {
 	echo '<div class="wrap"><h1>Authenticated Privilege Guard 設定</h1>';
+	echo '<p>このプラグインは、内部の認証済みユーザーアカウントが乗っ取られた場合に、サイトへの致命的な変更を防ぐための補助的な防御線を提供します。</p>';
 	echo '<form method="post" action="options.php">';
 	settings_fields( 'apg_settings_group' );
 	do_settings_sections( 'apg-settings' );

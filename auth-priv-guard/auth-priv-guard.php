@@ -36,12 +36,36 @@ function apg_get_option( $key = null, $default = null ) {
  * 安全ログ関数
  * ========================================================= */
 function apg_log( $msg, $force = false ) {
-	// =========================================================
-	// ログ・ガード設定確認
-	// =========================================================
-	$opts = apg_get_option();
+	// CLI環境ではまずスキップ判断
+	$is_cli = ( php_sapi_name() === 'cli' || ( defined( 'WP_CLI' ) && WP_CLI ) );
+
+	// ここでオプション取得
+	$opts = get_option( 'apg_options' );
+
+	// =====================================================
+	// ① オプション未ロード時は安全側に倒す（無効扱い）
+	// =====================================================
+	if ( ! is_array( $opts ) ) {
+		return; // 初期化不完全時はログを止める
+	}
+
+	// =====================================================
+	// ② 通常設定判定
+	// =====================================================
 	$enable_guard    = ! empty( $opts['enable_guard'] );
 	$disable_logging = ! empty( $opts['disable_logging'] );
+
+	// CLI時は設定尊重
+	if ( $is_cli && $disable_logging && ! $force ) {
+		return;
+	}
+
+	if ( ! $enable_guard && ! $force ) {
+		return;
+	}
+	if ( $disable_logging && ! $force ) {
+		return;
+	}
 
 	// ログ無効の場合は完全停止
 	if ( $disable_logging && ! $force ) {
@@ -60,8 +84,10 @@ function apg_log( $msg, $force = false ) {
 	$custom_dir = trim( $opts['log_dir'] ?? '' );
 	$target_dir = $base_dir . 'apg-logs/'; // デフォルト
 
-	$invalid = false;
+	$invalid = false; // ← ここを追加
+
 	if ( $custom_dir !== '' ) {
+		// 不正文字・パス操作対策
 		if (
 			preg_match( '/[^a-zA-Z0-9_\-\/]/', $custom_dir ) ||
 			strpos( $custom_dir, '..' ) !== false ||
@@ -69,21 +95,32 @@ function apg_log( $msg, $force = false ) {
 			preg_match( '/\s/', $custom_dir )
 		) {
 			$invalid = true;
-		} else {
-			$resolved = realpath( $base_dir . $custom_dir );
-			if ( $resolved === false || strpos( $resolved, realpath( $base_dir ) ) !== 0 ) {
-				$invalid = true;
+	} else {
+			$custom_path = $base_dir . ltrim( $custom_dir, '/' ); // ← ここが必須！
+
+			global $wp_filesystem;
+			if ( ! function_exists( 'WP_Filesystem' ) ) {
+				require_once ABSPATH . 'wp-admin/includes/file.php';
+			}
+			WP_Filesystem();
+
+			// ディレクトリ生成（WP_Filesystem経由）
+			if ( ! $wp_filesystem->is_dir( $custom_path ) ) {
+				wp_mkdir_p( $custom_path );
+			}
+
+			// 書き込み可否チェックも WP_Filesystem で実施
+			if ( $wp_filesystem->is_dir( $custom_path ) && $wp_filesystem->is_writable( $custom_path ) ) {
+				$target_dir = trailingslashit( $custom_path );
+				$invalid = false;
 			} else {
-				$target_dir = trailingslashit( $resolved );
+				$invalid = true;
 			}
 		}
 	}
 
-	if ( $invalid ) {
+	if ( ! empty( $invalid ) ) {
 		$target_dir = $base_dir . 'apg-logs-fallback/';
-	}
-
-	if ( ! file_exists( $target_dir ) ) {
 		wp_mkdir_p( $target_dir );
 	}
 
@@ -101,7 +138,14 @@ function apg_log( $msg, $force = false ) {
 	$time = gmdate( 'Y-m-d H:i:s' );
 	$line = sprintf( "[%s] %s\n", $time, $msg );
 
-	$wp_filesystem->put_contents( $file, $line, FS_CHMOD_FILE );
+	$max_size = 100 * 1024; // 100KB
+	if ( file_exists( $file ) && filesize( $file ) > $max_size ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename
+  		rename( $file, $file . '.' . gmdate('Ymd_His') . '.bak' );
+	}
+	file_put_contents( $file, $line, FILE_APPEND | LOCK_EX );
+	// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod
+	@chmod( $file, FS_CHMOD_FILE );
 }
 
 /* =========================================================

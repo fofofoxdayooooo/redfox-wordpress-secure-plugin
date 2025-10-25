@@ -51,7 +51,7 @@ class BFG_WPTable {
 		// REST API と XML-RPC のブロックチェックを早期に実行 (priority 5)
 		add_action( 'rest_authentication_errors', array( $this, 'check_block' ), 5 );
 		add_action( 'xmlrpc_call', array( $this, 'check_block' ), 5 );
-		add_action( 'init', array( $this, 'disable_email_login' ), 11 );
+		add_action( 'login_init', array( $this, 'disable_email_login' ), 11 );
 		add_filter( 'login_errors', array( $this, 'filter_login_errors' ) );
 		add_action( 'init', array( $this, 'cleanup' ) );
 

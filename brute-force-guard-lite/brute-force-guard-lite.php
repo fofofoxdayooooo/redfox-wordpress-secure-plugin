@@ -51,6 +51,7 @@ class BFG_WPTable {
 		// REST API と XML-RPC のブロックチェックを早期に実行 (priority 5)
 		add_action( 'rest_authentication_errors', array( $this, 'check_block' ), 5 );
 		add_action( 'xmlrpc_call', array( $this, 'check_block' ), 5 );
+		add_action( 'init', array( $this, 'disable_email_login' ), 11 );
 		add_filter( 'login_errors', array( $this, 'filter_login_errors' ) );
 		add_action( 'init', array( $this, 'cleanup' ) );
 
@@ -107,6 +108,11 @@ class BFG_WPTable {
 		}
 	}
 
+	public function disable_email_login() {
+		if ( $this->options['disable_email'] == 1 ) {
+			remove_filter( 'authenticate', 'wp_authenticate_email_password', 20 );
+		}
+	}
 
 	/**
 	 * Get client IP. Supports Trusted Proxies configuration.
@@ -411,6 +417,7 @@ class BFG_WPTable {
 		add_settings_field( 'login_error_message', esc_html( 'Custom login error message', self::TEXT_DOMAIN ), array( $this, 'field_login_error_message' ), 'bfg-lite', 'bfg_main');
 		add_settings_field( 'log_retention', esc_html( 'Log retention (seconds)', self::TEXT_DOMAIN ), array( $this, 'field_log_retention' ), 'bfg-lite', 'bfg_main' );
 		add_settings_field( 'log_enabled', esc_html( 'Enable logging', self::TEXT_DOMAIN ), array( $this, 'field_log_enabled' ), 'bfg-lite', 'bfg_main' );
+		add_settings_field( 'disable_email', esc_html( 'Disable e-mail Login', self::TEXT_DOMAIN ), array( $this, 'field_disable_email' ), 'bfg-lite', 'bfg_main' );
 		add_settings_field( 'trusted_proxies', esc_html( 'Trusted proxy IPs (one per line, CIDR supported)', self::TEXT_DOMAIN ), array( $this, 'field_trusted_proxies' ), 'bfg-lite', 'bfg_main');
 		add_settings_field( 'allow_users', esc_html( 'Users not subject to regulation', self::TEXT_DOMAIN ), array( $this, 'field_allow_users' ), 'bfg-lite', 'bfg_main');
 	}
@@ -427,6 +434,7 @@ class BFG_WPTable {
 			'block_message' => isset( $input['block_message'] ) ? sanitize_text_field( $input['block_message'] ) : '',
 			'block_rest_message' => isset( $input['block_rest_message'] ) ? sanitize_text_field( $input['block_rest_message'] ) : '',
 			'login_error_message' => isset( $input['login_error_message'] ) ? sanitize_text_field( $input['login_error_message'] ) : '',
+			'disable_email'	=> isset( $input['disable_email'] ) && $input['disable_email'] ? 1 : 0,
 			// テキストエリアは sanitize_textarea_field でXSSを防止
 			'trusted_proxies' => isset( $input['trusted_proxies'] ) ? sanitize_textarea_field( $input['trusted_proxies'] ) : '',
 			'allow_users' => isset( $input['allow_users'] ) ? sanitize_textarea_field( $input['allow_users'] ) : '',
@@ -507,15 +515,6 @@ class BFG_WPTable {
 		);
 	}
 
-	public function filter_login_errors( $error ) {
-		// カスタムメッセージが設定されている場合はそれを使用
-	    if ( ! empty( $this->options['login_error_message'] ) ) {
-			return esc_html( $this->options['login_error_message'] ); // 出力を適切にエスケープ
-	    }
-		// デフォルトメッセージを返す場合
-	    return esc_html( 'ログイン情報が正しくありません。', self::TEXT_DOMAIN );
-	}
-
 	public function field_login_error_message() {
 		$val = isset( $this->options['login_error_message'] ) ? esc_attr( $this->options['login_error_message'] ) : '';
 		printf(
@@ -535,6 +534,16 @@ class BFG_WPTable {
 		echo '<p class="description">' . esc_html( '信頼するプロキシのCIDRまたはIPを1行ずつ入力してください。Cloudflare等の環境ではこの設定を利用します。', self::TEXT_DOMAIN ) . '</p>';
 	}
 	
+	public function field_disable_email() {
+		$checked = isset( $this->options['disable_email'] ) && $this->options['disable_email'] ? 'checked' : '';
+		printf(
+			'<label><input type="checkbox" name="%s[disable_email]" value="1" %s /> %s</label>',
+			esc_attr( self::OPTION_KEY ),
+			esc_attr( $checked ),
+			esc_html( 'Disable E-mail Login', self::TEXT_DOMAIN )
+		);
+	}
+	
 	public function field_allow_users() {
 		$val = isset( $this->options['allow_users'] ) ? ( $this->options['allow_users'] ) : '';
 		// フィールド名に self::OPTION_KEY を使用 (sanitize_text_field は不要)
@@ -543,6 +552,15 @@ class BFG_WPTable {
 		// テキストエリアの出力は esc_textarea で安全にエスケープ
 		echo '<textarea name="' . esc_attr( $field_name ) . '[allow_users]" rows="4" cols="80" placeholder="例: user1 user2">' . esc_textarea($val) . '</textarea>';
 		echo '<p class="description">' . esc_html( 'ログイン制限を適用しないユーザーの一覧を入力してください。これらのユーザーIDが入力された場合はカウント対象外とします。', self::TEXT_DOMAIN ) . '</p>';
+	}
+
+	public function filter_login_errors( $error ) {
+		// カスタムメッセージが設定されている場合はそれを使用
+	    if ( ! empty( $this->options['login_error_message'] ) ) {
+			return esc_html( $this->options['login_error_message'] ); // 出力を適切にエスケープ
+	    }
+		// デフォルトメッセージを返す場合
+	    return esc_html( 'ログイン情報が正しくありません。', self::TEXT_DOMAIN );
 	}
 
 	/**

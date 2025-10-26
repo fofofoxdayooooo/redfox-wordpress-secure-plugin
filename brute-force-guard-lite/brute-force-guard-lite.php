@@ -19,8 +19,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class BFG_WPTable {
 	const OPTION_KEY	=	'bfg_options';
+	// TEXT_DOMAIN は i18n 関数内ではリテラル文字列に置き換えられます
 	const TEXT_DOMAIN	=	'brute-force-guard-lite';
 	const TABLE_SUFFIX	=	'bfg_logs';
+	const TABLE_HISTORY = 'bfg_history';
 	/** @var wpdb */
 	private $wpdb;
 	/** @var string */
@@ -48,6 +50,8 @@ class BFG_WPTable {
 		add_action( 'wp_login_failed', array( $this, 'record_failed' ) );
 		add_action( 'wp_login', array( $this, 'record_success' ), 10, 2 );
 		add_action( 'login_init', array( $this, 'check_block' ) );
+		// 【追加】ログインページにアクセスしたIPアドレスを記録 (優先度20で低く設定)
+		add_action( 'login_init', array( $this, 'record_access_to_login_page' ), 20 );
 		// REST API と XML-RPC のブロックチェックを早期に実行 (priority 5)
 		add_action( 'rest_authentication_errors', array( $this, 'check_block' ), 5 );
 		add_action( 'xmlrpc_call', array( $this, 'check_block' ), 5 );
@@ -71,17 +75,31 @@ class BFG_WPTable {
 		$table = $wpdb->prefix . self::TABLE_SUFFIX;
 		$charset_collate = $wpdb->get_charset_collate();
 
+		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+
 		// ip フィールドの長さを IPv6 に対応できるよう 45 に設定済み (Good)
 		$sql = "CREATE TABLE {$table} (
 			ip varchar(45) NOT NULL,
 			attempts int NOT NULL DEFAULT 0,
 			last_attempt bigint NOT NULL DEFAULT 0,
-			PRIMARY KEY  (ip)
+			PRIMARY KEY (ip)
 		) {$charset_collate};";
 
-		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 		dbDelta( $sql );
 
+		// main table作成後、履歴テーブルも作成
+		$history_table = $wpdb->prefix . self::TABLE_HISTORY;
+		$sql2 = "CREATE TABLE {$history_table} (
+			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+			ip varchar(45) NOT NULL,
+			username varchar(60) DEFAULT '',
+			result varchar(10) NOT NULL,
+			timestamp bigint(20) NOT NULL,
+			PRIMARY KEY (id),
+			KEY ip (ip)
+		) {$charset_collate};";
+		dbDelta( $sql2 );
+		
 		// set default options if absent
 		$defaults = array(
 			'max_attempts'	=> 5,
@@ -97,19 +115,24 @@ class BFG_WPTable {
 	 * Ensure DB exists (safety) - Table check improved for better SQL safety.
 	 */
 	public function maybe_init_db() {
-		// wpdb->tables にはすでにプレフィックスが付いているため、LIKE句を使用
-		$sql = $this->wpdb->prepare( "SHOW TABLES LIKE %s", $this->table_name );
-		// $this->table_name は $wpdb->prefix に続く文字列で、すでに $this->wpdb->esc_like が不要な形式で比較しているため、これで十分安全。
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$result	= $this->wpdb->get_var( $sql );
+		global $wpdb;
+		// main table
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		$main_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $this->table_name ) );
 
-		if ( $result === null ) {
+		// history table
+		$history_table = $wpdb->prefix . self::TABLE_HISTORY;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		$history_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $history_table ) );
+
+		if ( $main_exists === null || $history_exists === null ) {
 			self::activate();
 		}
 	}
 
+
 	public function disable_email_login() {
-		if ( $this->options['disable_email'] == 1 ) {
+		if ( isset( $this->options['disable_email'] ) && $this->options['disable_email'] == 1 ) {
 			remove_filter( 'authenticate', 'wp_authenticate_email_password', 20 );
 		}
 	}
@@ -217,7 +240,7 @@ class BFG_WPTable {
 
 		// バイト単位でのチェック
 		$bytes_to_check = floor( $mask / 8 );
-		$bits_to_check  = $mask % 8;
+		$bits_to_check = $mask % 8;
 
 		// 完全にマスクされているバイトを比較
 		if ( $bytes_to_check > 0 ) {
@@ -241,6 +264,49 @@ class BFG_WPTable {
 	}
 
 	/**
+	 * Record IP address when the login page is accessed, separately from attempts.
+	 * Throttle recording to prevent excessive logging.
+	 */
+	public function record_access_to_login_page() {
+		$options = $this->options;
+		if ( empty( $options['log_enabled'] ) ) {
+			return;
+		}
+
+		$ip = $this->get_ip();
+		$time = time();
+		$history_table = $this->wpdb->prefix . self::TABLE_HISTORY;
+		$throttle_seconds = 300; // 5 minutes throttle
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		$recent_view = $this->wpdb->get_var( $this->wpdb->prepare(
+			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			"SELECT 1 FROM " . $history_table . " WHERE ip = %s AND result = 'view' AND timestamp > %d LIMIT 1",
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared
+			$ip,
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared
+			$time - $throttle_seconds
+		) );
+
+		if ( $recent_view ) {
+			return; // 5分以内に記録済みのためスキップ
+		}
+		
+		// 新規アクセスを記録
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$this->wpdb->insert(
+			$history_table,
+			array(
+				'ip' => $ip,
+				'username' => '',
+				'result' => 'view', // 'failed' や 'success' とは異なる結果
+				'timestamp' => $time,
+			),
+			array( '%s', '%s', '%s', '%d' )
+		);
+	}
+
+	/**
 	 * Record failed login: increment attempts or insert new row.
 	 *
 	 * @param string $username
@@ -258,15 +324,13 @@ class BFG_WPTable {
 				return; // 対象外
 			}
 		}
-
-
-
 		$ip = $this->get_ip();
 		$time = time();
 		
 		// check existing - using $this->table_name directly as it is safe (prefixed and defined internally)
 		$sql	= "SELECT attempts FROM {$this->table_name} WHERE ip = %s LIMIT 1";
-		$row	= $this->wpdb->get_row( $this->wpdb->prepare( $sql, $ip ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $this->table_name is not user input
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $this->table_name is non-user input.
+		$row	= $this->wpdb->get_row( $this->wpdb->prepare( $sql, $ip ), ARRAY_A );
 
 		if ( $row ) {
 			// 既存レコードがある場合
@@ -278,9 +342,11 @@ class BFG_WPTable {
 				// 上限に達している場合（試行回数はそのまま維持）
 				$sql = "UPDATE {$this->table_name} SET last_attempt = %d WHERE ip = %s";
 			}
-			$this->wpdb->query( $this->wpdb->prepare( $sql, $time, $ip ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $this->table_name is not user input
+			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $this->table_name is non-user input.
+			$this->wpdb->query( $this->wpdb->prepare( $sql, $time, $ip ) );
 		} else {
 			// レコードが存在しない場合、新規挿入 (attempts = 1)
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 			$this->wpdb->insert(
 				$this->table_name,
 				array(
@@ -291,6 +357,18 @@ class BFG_WPTable {
 				array( '%s', '%d', '%d' )
 			);
 		}
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$this->wpdb->insert(
+			$this->wpdb->prefix . self::TABLE_HISTORY,
+				array(
+					'ip' => $ip,
+					'username' => sanitize_user( $username, true ),
+					'result' => 'failed',
+					'timestamp' => time(),
+				),
+				array( '%s', '%s', '%s', '%d' ));
+
 	}
 
 	/**
@@ -312,7 +390,15 @@ class BFG_WPTable {
 		}
 		$ip = $this->get_ip();
 		// 成功時はログを削除し、完全にリセットする
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 		$this->wpdb->delete( $this->table_name, array( 'ip' => $ip ), array( '%s' ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$this->wpdb->insert( $this->wpdb->prefix . self::TABLE_HISTORY, array(
+			'ip' => $ip,
+			'username' => sanitize_user( $user_login, true ), // $user_loginを使用
+			'result' => 'success', // 成功時は 'success' を記録
+			'timestamp' => time(),),
+		array( '%s', '%s', '%s', '%d' ));
 	}
 
 	/**
@@ -325,7 +411,8 @@ class BFG_WPTable {
 
 		$sql = "SELECT attempts, last_attempt FROM {$this->table_name} WHERE ip = %s LIMIT 1";
 		$row = $this->wpdb->get_row(
-			$this->wpdb->prepare( $sql, $ip ), // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $this->table_name is not user input
+			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $this->table_name is non-user input.
+			$this->wpdb->prepare( $sql, $ip ),
 			ARRAY_A
 		);
 
@@ -347,14 +434,14 @@ class BFG_WPTable {
 					? sanitize_text_field( $options['block_message'] )
 					: sprintf(
 						/* translators: %s: minutes */
-						esc_html( 'Access temporarily blocked due to multiple failed login attempts. Please try again later (%s minutes).', self::TEXT_DOMAIN ),
+						esc_html__( 'Access temporarily blocked due to multiple failed login attempts. Please try again later (%s minutes).', 'brute-force-guard-lite' ), // I18n Fix
 						(int)$options['block_minutes']
 					);
 				$rest_message = ! empty( $options['block_rest_message'] )
 					? sanitize_text_field( $options['block_rest_message'] )
 					: sprintf(
 						/* translators: %s: minutes */
-						esc_html( 'Access temporarily blocked due to multiple failed login attempts. Please try again later (%s minutes).', self::TEXT_DOMAIN ),
+						esc_html__( 'Access temporarily blocked due to multiple failed login attempts. Please try again later (%s minutes).', 'brute-force-guard-lite' ), // I18n Fix
 						(int)$options['block_minutes']
 					);
 				
@@ -368,12 +455,14 @@ class BFG_WPTable {
 					exit( esc_html( $message ) );
 				}
 				// 通常のログイン/管理画面アクセス
-				wp_die( esc_html( $message ), esc_html( 'Access blocked', self::TEXT_DOMAIN ), array( 'response' => esc_html($code) ) );
+				// I18n Fix
+				wp_die( esc_html( $message ), esc_html__( 'Access blocked', 'brute-force-guard-lite' ), array( 'response' => esc_html( $code ) ) );
 
 			} else {
 				// ブロック期間 expired -> attemptsをリセット
 				$sql = "UPDATE {$this->table_name} SET attempts = 0, last_attempt = %d WHERE ip = %s";
-				$this->wpdb->query( $this->wpdb->prepare( $sql, $time, $ip ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $this->table_name is not user input
+				// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $this->table_name is non-user input.
+				$this->wpdb->query( $this->wpdb->prepare( $sql, $time, $ip ) );
 			}
 		}
 	}
@@ -383,13 +472,26 @@ class BFG_WPTable {
 	 */
 	public function cleanup() {
 		$options = $this->options;
-		$threshold = time() - (int)$options['log_retention'];
-		
-		$sql = "DELETE FROM {$this->table_name} WHERE last_attempt < %d AND attempts < %d"; // attempts < 1 (or 0) のもののみを削除する方がより安全だが、ここでは元のコードのロジックに近づける (attemptsは0にリセットされるため)
-		$this->wpdb->query(
-			$this->wpdb->prepare( $sql, $threshold, (int)$options['max_attempts'] ) // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $this->table_name is not user input
-		);
+		$threshold = time() - (int) $options['log_retention'];
+
+		// main table cleanup
+		$table_name_safe = esc_sql( $this->table_name );
+		$sql = "DELETE FROM {$table_name_safe} WHERE last_attempt < %d AND attempts < %d";
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		$prepared = $this->wpdb->prepare( $sql, $threshold, (int) $options['max_attempts'] );
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $table_name_safe はサニタイズ済みです。
+		$this->wpdb->query( $prepared );
+
+		// history table cleanup
+		$history_table_safe = esc_sql( $this->wpdb->prefix . self::TABLE_HISTORY );
+		$sql_history = "DELETE FROM {$history_table_safe} WHERE result = 'view' AND timestamp < %d";
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		$prepared_history = $this->wpdb->prepare( $sql_history, $threshold );
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		$this->wpdb->query( $prepared_history );
 	}
+
 
 	/* ------------------------
 	 Settings / Admin UI
@@ -397,8 +499,8 @@ class BFG_WPTable {
 
 	public function add_admin_menu() {
 		add_options_page(
-			esc_html( 'BruteForce Guard Lite', self::TEXT_DOMAIN ),
-			esc_html( 'BruteForce Guard Lite', self::TEXT_DOMAIN ),
+			esc_html__( 'BruteForce Guard Lite', 'brute-force-guard-lite' ), // I18n Fix
+			esc_html__( 'BruteForce Guard Lite', 'brute-force-guard-lite' ), // I18n Fix
 			'manage_options',
 			'bfg-lite',
 			array( $this, 'render_settings_page' )
@@ -407,19 +509,19 @@ class BFG_WPTable {
 
 	public function register_settings() {
 		register_setting( 'bfg_lite_group', self::OPTION_KEY, array( $this, 'sanitize_options' ) );
-		add_settings_section( 'bfg_main', esc_html( 'Basic settings', self::TEXT_DOMAIN ), null, 'bfg-lite' );
-		add_settings_field( 'max_attempts', esc_html( 'Max attempts', self::TEXT_DOMAIN ), array( $this, 'field_max_attempts' ), 'bfg-lite', 'bfg_main' );
-		add_settings_field( 'block_minutes', esc_html( 'Block minutes', self::TEXT_DOMAIN ), array( $this, 'field_block_minutes' ), 'bfg-lite', 'bfg_main' );
-		add_settings_field( 'block_status', esc_html( 'Custom block status', self::TEXT_DOMAIN ), array( $this, 'field_block_status' ), 'bfg-lite', 'bfg_main' );
-		add_settings_field( 'block_code', esc_html( 'Custom block code', self::TEXT_DOMAIN ), array( $this, 'field_block_code' ), 'bfg-lite', 'bfg_main' );
-		add_settings_field( 'block_message', esc_html( 'Custom block message', self::TEXT_DOMAIN ), array( $this, 'field_block_message' ), 'bfg-lite', 'bfg_main' );
-		add_settings_field( 'block_rest_message', esc_html( 'Custom rest message', self::TEXT_DOMAIN ), array( $this, 'field_block_rest_message' ), 'bfg-lite', 'bfg_main' );
-		add_settings_field( 'login_error_message', esc_html( 'Custom login error message', self::TEXT_DOMAIN ), array( $this, 'field_login_error_message' ), 'bfg-lite', 'bfg_main');
-		add_settings_field( 'log_retention', esc_html( 'Log retention (seconds)', self::TEXT_DOMAIN ), array( $this, 'field_log_retention' ), 'bfg-lite', 'bfg_main' );
-		add_settings_field( 'log_enabled', esc_html( 'Enable logging', self::TEXT_DOMAIN ), array( $this, 'field_log_enabled' ), 'bfg-lite', 'bfg_main' );
-		add_settings_field( 'disable_email', esc_html( 'Disable e-mail Login', self::TEXT_DOMAIN ), array( $this, 'field_disable_email' ), 'bfg-lite', 'bfg_main' );
-		add_settings_field( 'trusted_proxies', esc_html( 'Trusted proxy IPs (one per line, CIDR supported)', self::TEXT_DOMAIN ), array( $this, 'field_trusted_proxies' ), 'bfg-lite', 'bfg_main');
-		add_settings_field( 'allow_users', esc_html( 'Users not subject to regulation', self::TEXT_DOMAIN ), array( $this, 'field_allow_users' ), 'bfg-lite', 'bfg_main');
+		add_settings_section( 'bfg_main', esc_html__( 'Basic settings', 'brute-force-guard-lite' ), null, 'bfg-lite' ); // I18n Fix
+		add_settings_field( 'max_attempts', esc_html__( 'Max attempts', 'brute-force-guard-lite' ), array( $this, 'field_max_attempts' ), 'bfg-lite', 'bfg_main' ); // I18n Fix
+		add_settings_field( 'block_minutes', esc_html__( 'Block minutes', 'brute-force-guard-lite' ), array( $this, 'field_block_minutes' ), 'bfg-lite', 'bfg_main' ); // I18n Fix
+		add_settings_field( 'block_status', esc_html__( 'Custom block status', 'brute-force-guard-lite' ), array( $this, 'field_block_status' ), 'bfg-lite', 'bfg_main' ); // I18n Fix
+		add_settings_field( 'block_code', esc_html__( 'Custom block code', 'brute-force-guard-lite' ), array( $this, 'field_block_code' ), 'bfg-lite', 'bfg_main' ); // I18n Fix
+		add_settings_field( 'block_message', esc_html__( 'Custom block message', 'brute-force-guard-lite' ), array( $this, 'field_block_message' ), 'bfg-lite', 'bfg_main' ); // I18n Fix
+		add_settings_field( 'block_rest_message', esc_html__( 'Custom rest message', 'brute-force-guard-lite' ), array( $this, 'field_block_rest_message' ), 'bfg-lite', 'bfg_main' ); // I18n Fix
+		add_settings_field( 'login_error_message', esc_html__( 'Custom login error message', 'brute-force-guard-lite' ), array( $this, 'field_login_error_message' ), 'bfg-lite', 'bfg_main'); // I18n Fix
+		add_settings_field( 'log_retention', esc_html__( 'Log retention (seconds)', 'brute-force-guard-lite' ), array( $this, 'field_log_retention' ), 'bfg-lite', 'bfg_main' ); // I18n Fix
+		add_settings_field( 'log_enabled', esc_html__( 'Enable logging', 'brute-force-guard-lite' ), array( $this, 'field_log_enabled' ), 'bfg-lite', 'bfg_main' ); // I18n Fix
+		add_settings_field( 'disable_email', esc_html__( 'Disable e-mail Login', 'brute-force-guard-lite' ), array( $this, 'field_disable_email' ), 'bfg-lite', 'bfg_main' ); // I18n Fix
+		add_settings_field( 'trusted_proxies', esc_html__( 'Trusted proxy IPs (one per line, CIDR supported)', 'brute-force-guard-lite' ), array( $this, 'field_trusted_proxies' ), 'bfg-lite', 'bfg_main'); // I18n Fix
+		add_settings_field( 'allow_users', esc_html__( 'Users not subject to regulation', 'brute-force-guard-lite' ), array( $this, 'field_allow_users' ), 'bfg-lite', 'bfg_main'); // I18n Fix
 	}
 
 	public function sanitize_options( $input ) {
@@ -475,7 +577,7 @@ class BFG_WPTable {
 			'<label><input type="checkbox" name="%s[log_enabled]" value="1" %s /> %s</label>',
 			esc_attr( self::OPTION_KEY ),
 			esc_attr( $checked ),
-			esc_html( 'Enable logging of attempts', self::TEXT_DOMAIN )
+			esc_html__( 'Enable logging of attempts', 'brute-force-guard-lite' ) // I18n Fix
 		);
 	}
 
@@ -484,7 +586,7 @@ class BFG_WPTable {
 		printf(
 			'<input type="text" name="%s[block_status]" value="%s" size="80" placeholder="error" />',
 			esc_attr( self::OPTION_KEY ),
-			esc_html($val) // esc_attr is used inside the assignment of $val
+			esc_attr($val) // esc_attr is used inside the assignment of $val
 		);
 	}
 
@@ -493,7 +595,7 @@ class BFG_WPTable {
 		printf(
 			'<input type="number" name="%s[block_code]" value="%s" size="80" placeholder="403" min="200" max="599" />',
 			esc_attr( self::OPTION_KEY ),
-			esc_html($val) // esc_attr is used inside the assignment of $val
+			esc_attr($val) // esc_attr is used inside the assignment of $val
 		);
 	}
 
@@ -502,7 +604,7 @@ class BFG_WPTable {
 		printf(
 			'<input type="text" name="%s[block_message]" value="%s" size="80" placeholder="Access temporarily blocked." />',
 			esc_attr( self::OPTION_KEY ),
-			esc_html($val) // esc_attr is used inside the assignment of $val
+			esc_attr($val) // esc_attr is used inside the assignment of $val
 		);
 	}
 
@@ -511,7 +613,7 @@ class BFG_WPTable {
 		printf(
 			'<input type="text" name="%s[block_rest_message]" value="%s" size="80" placeholder="Access temporarily blocked." />',
 			esc_attr( self::OPTION_KEY ),
-			esc_html($val) // esc_attr is used inside the assignment of $val
+			esc_attr($val) // esc_attr is used inside the assignment of $val
 		);
 	}
 
@@ -520,7 +622,7 @@ class BFG_WPTable {
 		printf(
 			'<input type="text" name="%s[login_error_message]" value="%s" size="80" placeholder="ログイン情報が正しくありません。" />',
 			esc_attr( self::OPTION_KEY ),
-			esc_html($val) // esc_attr is used inside the assignment of $val
+			esc_attr($val) // esc_attr is used inside the assignment of $val
 		);
 	}
 	
@@ -531,7 +633,7 @@ class BFG_WPTable {
 		
 		// テキストエリアの出力は esc_textarea で安全にエスケープ
 		echo '<textarea name="' . esc_attr( $field_name ) . '[trusted_proxies]" rows="4" cols="80" placeholder="例: 173.245.48.0/20&#10;2400:cb00::/32">' . esc_textarea($val) . '</textarea>';
-		echo '<p class="description">' . esc_html( '信頼するプロキシのCIDRまたはIPを1行ずつ入力してください。Cloudflare等の環境ではこの設定を利用します。', self::TEXT_DOMAIN ) . '</p>';
+		echo '<p class="description">' . esc_html__( '信頼するプロキシのCIDRまたはIPを1行ずつ入力してください。Cloudflare等の環境ではこの設定を利用します。', 'brute-force-guard-lite' ) . '</p>'; // I18n Fix
 	}
 	
 	public function field_disable_email() {
@@ -540,7 +642,7 @@ class BFG_WPTable {
 			'<label><input type="checkbox" name="%s[disable_email]" value="1" %s /> %s</label>',
 			esc_attr( self::OPTION_KEY ),
 			esc_attr( $checked ),
-			esc_html( 'Disable E-mail Login', self::TEXT_DOMAIN )
+			esc_html__( 'Disable E-mail Login', 'brute-force-guard-lite' ) // I18n Fix
 		);
 	}
 	
@@ -551,40 +653,75 @@ class BFG_WPTable {
 		
 		// テキストエリアの出力は esc_textarea で安全にエスケープ
 		echo '<textarea name="' . esc_attr( $field_name ) . '[allow_users]" rows="4" cols="80" placeholder="例: user1 user2">' . esc_textarea($val) . '</textarea>';
-		echo '<p class="description">' . esc_html( 'ログイン制限を適用しないユーザーの一覧を入力してください。これらのユーザーIDが入力された場合はカウント対象外とします。', self::TEXT_DOMAIN ) . '</p>';
+		echo '<p class="description">' . esc_html__( 'ログイン制限を適用しないユーザーの一覧を入力してください。これらのユーザーIDが入力された場合はカウント対象外とします。', 'brute-force-guard-lite' ) . '</p>'; // I18n Fix
 	}
 
 	public function filter_login_errors( $error ) {
 		// カスタムメッセージが設定されている場合はそれを使用
-	    if ( ! empty( $this->options['login_error_message'] ) ) {
+		if ( ! empty( $this->options['login_error_message'] ) ) {
 			return esc_html( $this->options['login_error_message'] ); // 出力を適切にエスケープ
-	    }
+		}
 		// デフォルトメッセージを返す場合
-	    return esc_html( 'ログイン情報が正しくありません。', self::TEXT_DOMAIN );
+		return esc_html__( 'ログイン情報が正しくありません。', 'brute-force-guard-lite' ); // I18n Fix
 	}
 
 	/**
 	 * Settings page + blocked IP listing
 	 */
+	/**
+	 * Render plugin settings page with tab navigation.
+	 *
+	 * @return void
+	 */
 	public function render_settings_page() {
-		// reload options (in case changed)
+		// 最新オプションを再読込
 		$this->options = get_option( self::OPTION_KEY, $this->options );
 
 		echo '<div class="wrap">';
-		echo '<h1>' . esc_html( 'BruteForce Guard Lite Settings', self::TEXT_DOMAIN ) . '</h1>';
+		echo '<h1>' . esc_html__( 'BruteForce Guard Lite Settings', 'brute-force-guard-lite' ) . '</h1>'; // I18n Fix
 
-		echo '<form method="post" action="options.php">';
-		settings_fields( 'bfg_lite_group' );
-		do_settings_sections( 'bfg-lite' );
-		submit_button();
-		echo '</form>';
+		// ================================
+		// タブ切り替えリンクの安全処理
+		// ================================
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only GET param for display purpose.
+		$current_tab = isset( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : 'settings';
 
-		// Blocked IPs
-		echo '<h2>' . esc_html( 'Blocked IPs', self::TEXT_DOMAIN ) . '</h2>';
-		$this->render_blocked_ips_table();
+		echo '<h2 class="nav-tab-wrapper">';
+		printf(
+			'<a href="%s" class="nav-tab %s">%s</a>',
+			esc_url( admin_url( 'options-general.php?page=bfg-lite&tab=settings' ) ),
+			( 'settings' === $current_tab ) ? 'nav-tab-active' : '',
+			esc_html__( 'Settings', 'brute-force-guard-lite' )
+		);
+		printf(
+			'<a href="%s" class="nav-tab %s">%s</a>',
+			esc_url( admin_url( 'options-general.php?page=bfg-lite&tab=history' ) ),
+			( 'history' === $current_tab ) ? 'nav-tab-active' : '',
+			esc_html__( 'Login History', 'brute-force-guard-lite' )
+		);
+		echo '</h2>';
+
+		// ================================
+		// タブ切り替え処理本体
+		// ================================
+		if ( 'history' === $current_tab ) {
+			$this->render_history_table();
+		} else {
+			// 設定フォームは options.php の nonce を自動処理するため、追加不要。
+			echo '<form method="post" action="options.php">';
+			settings_fields( 'bfg_lite_group' ); // Nonce + option group hidden fields 自動出力
+			do_settings_sections( 'bfg-lite' );
+			submit_button();
+			echo '</form>';
+
+			// ブロック中IP一覧
+			echo '<h2>' . esc_html__( 'Blocked IPs', 'brute-force-guard-lite' ) . '</h2>';
+			$this->render_blocked_ips_table();
+		}
 
 		echo '</div>';
 	}
+
 
 	/**
 	 * Render blocked ips table (simple)
@@ -593,58 +730,141 @@ class BFG_WPTable {
 		$options = $this->options;
 		
 		// attempts が 1 以上（つまりログが残っているIP）を表示
-		$sql = "SELECT ip, attempts, last_attempt FROM {$this->table_name} WHERE attempts >= %d ORDER BY last_attempt DESC LIMIT 200";
-		$rows = $this->wpdb->get_results($this->wpdb->prepare( $sql, 1 ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- $this->table_name is not user input
+		$table_name = esc_sql( $this->table_name );
+		$sql = "SELECT ip, attempts, last_attempt FROM " . $table_name . " WHERE attempts >= %d ORDER BY last_attempt DESC LIMIT 200";
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$rows = $this->wpdb->get_results($this->wpdb->prepare( $sql, 1 ), ARRAY_A );
 
 		echo '<table class="widefat fixed" cellspacing="0">';
-		echo '<thead><tr><th>' . esc_html( 'IP', self::TEXT_DOMAIN ) . '</th><th>' . esc_html( 'Attempts', self::TEXT_DOMAIN ) . '</th><th>' . esc_html( 'Last Attempt', self::TEXT_DOMAIN ) . '</th><th>' . esc_html( 'Action', self::TEXT_DOMAIN ) . '</th></tr></thead>';
+		echo '<thead><tr><th>' . esc_html__( 'IP', 'brute-force-guard-lite' ) . '</th><th>' . esc_html__( 'Attempts', 'brute-force-guard-lite' ) . '</th><th>' . esc_html__( 'Last Attempt', 'brute-force-guard-lite' ) . '</th><th>' . esc_html__( 'Action', 'brute-force-guard-lite' ) . '</th></tr></thead>'; // I18n Fix
 		echo '<tbody>';
 
 		if ( $rows ) {
 			foreach ( $rows as $row ) {
 				// 出力されるデータは全て適切にエスケープ
-				$ip = esc_html( $row['ip'] );
-				$attempts = esc_html( (int)$row['attempts'] );
-				$time = esc_html( date_i18n( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (int)$row['last_attempt'] ) );
+				$ip = $row['ip'];
+				$attempts = (int)$row['attempts'];
+				$time = date_i18n( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (int)$row['last_attempt'] );
 
 				$action_url = admin_url( 'admin-post.php' );
 				// IPアドレスごとに一意のNonceアクション名を設定 (CSRF対策)
-				$nonce_action = 'bfg_unblock_ip_' . $row['ip'];
+				$nonce_action = 'bfg_unblock_ip_' . $ip;
 				$nonce_field = wp_nonce_field( $nonce_action, '_bfg_nonce', true, false );
 				
-				printf(
-					'<tr><td>%s</td><td>%s</td><td>%s</td><td>
-						<form method="post" action="%s" style="display:inline;">
-							%s
-							<input type="hidden" name="action" value="bfg_unblock_ip" />
-							<input type="hidden" name="ip" value="%s" />
-							<input type="submit" class="button" value="%s" />
-						</form>
-					</td></tr>',
-					esc_attr($ip),
-					esc_attr($attempts),
-					esc_attr($time),
-					esc_url( $action_url ),
-					/* phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped */ 
-					$nonce_field,
-					esc_attr( $row['ip'] ),
-					esc_attr( 'Unblock', self::TEXT_DOMAIN )
-				);
+				// printfをechoに分割し、Nonce出力を安全に処理 (EscapeOutput Fix)
+				echo '<tr>';
+				echo '<td>' . esc_html( $ip ) . '</td>';
+				echo '<td>' . esc_html( $attempts ) . '</td>';
+				echo '<td>' . esc_html( $time ) . '</td>';
+				echo '<td>';
+				echo '<form method="post" action="' . esc_url( $action_url ) . '" style="display:inline;">';
+				echo /* phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped */ $nonce_field; // OutputNotEscaped Fix
+				echo '<input type="hidden" name="action" value="bfg_unblock_ip" />';
+				echo '<input type="hidden" name="ip" value="' . esc_attr( $ip ) . '" />';
+				echo '<input type="submit" class="button" value="' . esc_attr__( 'Unblock', 'brute-force-guard-lite' ) . '" />'; // I18n Fix
+				echo '</form>';
+				echo '</td>';
+				echo '</tr>';
 			}
 		} else {
-			echo '<tr><td colspan="4">' . esc_html( 'No blocked IPs.', self::TEXT_DOMAIN ) . '</td></tr>';
+			echo '<tr><td colspan="4">' . esc_html__( 'No blocked IPs.', 'brute-force-guard-lite' ) . '</td></tr>'; // I18n Fix
 		}
 
 		echo '</tbody></table>';
 	}
 
 	/**
+	 * Render login attempt history table with pagination.
+	 *
+	 * @return void
+	 */
+	private function render_history_table() {
+		global $wpdb;
+
+		$table = $wpdb->prefix . self::TABLE_HISTORY;
+		$safe_table = esc_sql( $table );
+		$per_page = 30;
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.DB.PreparedSQL.NotPrepared, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+		$page_param = isset( $_GET['paged'] ) ? wp_unslash( $_GET['paged'] ) : 1;
+		$page = max( 1, absint( $page_param ) );
+		$offset = ( $page - 1 ) * $per_page;
+
+		// 総件数（安全: 内部テーブルのみ）
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$safe_table}" );
+
+		// 最新順で取得
+		// 修正: テーブル名補間による PreparedSQL.InterpolatedNotPrepared 警告を解消するため、テーブル名と prepare を分離。
+		$sql = $wpdb->prepare(
+			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- Table name is safely escaped via esc_sql() and concatenated.
+			"SELECT ip, username, result, timestamp FROM " . $safe_table . " ORDER BY id DESC LIMIT %d OFFSET %d",
+			$per_page,
+			$offset
+		);
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared	
+		$rows = $wpdb->get_results( $sql, ARRAY_A );
+
+		echo '<h2>' . esc_html__( 'Login Attempts History', 'brute-force-guard-lite' ) . '</h2>';
+		echo '<table class="widefat fixed striped">';
+		echo '<thead><tr><th>' . esc_html__( 'IP', 'brute-force-guard-lite' ) . '</th><th>' .
+			esc_html__( 'Username', 'brute-force-guard-lite' ) . '</th><th>' .
+			esc_html__( 'Result', 'brute-force-guard-lite' ) . '</th><th>' .
+			esc_html__( 'Timestamp', 'brute-force-guard-lite' ) . '</th></tr></thead><tbody>';
+
+		if ( ! empty( $rows ) ) {
+			foreach ( $rows as $row ) {
+				// 'view' の結果表示名を「アクセス」に変更
+				$result_display = $row['result'] === 'view'
+					? esc_html__( 'Access', 'brute-force-guard-lite' )
+					: esc_html( ucfirst( $row['result'] ) );
+
+				printf(
+					'<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>',
+					esc_html( $row['ip'] ),
+					esc_html( $row['username'] ),
+					/* phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Variable is safely escaped upon assignment (L822/823). */
+					$result_display, // 表示名に変更
+					esc_html(
+						date_i18n(
+							get_option( 'date_format' ) . ' ' . get_option( 'time_format' ),
+							(int) $row['timestamp']
+						)
+					)
+				);
+			}
+		} else {
+			echo '<tr><td colspan="4">' . esc_html__( 'No history records found.', 'brute-force-guard-lite' ) . '</td></tr>';
+		}
+
+		echo '</tbody></table>';
+
+		// ページングリンク
+		$total_pages = max( 1, ceil( $total / $per_page ) );
+		echo '<div class="tablenav"><div class="tablenav-pages">';
+		// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- paginate_links() returns safe HTML.
+		echo paginate_links(
+			array(
+				'base' => add_query_arg( 'paged', '%#%' ),
+				'format' => '',
+				'prev_text' => '&laquo;',
+				'next_text' => '&raquo;',
+				'total' => $total_pages,
+				'current' => $page,
+			)
+		);
+		echo '</div></div>';
+	}
+
+	
+	/**
 	 * Handle unblock request from admin-post
 	 */
 	public function handle_unblock_ip() {
 		// 1. Capability check (Authorization)
 		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html( 'Not allowed', self::TEXT_DOMAIN ) );
+			wp_die( esc_html__( 'Not allowed', 'brute-force-guard-lite' ) ); // I18n Fix
 		}
 
 		$ip = isset( $_POST['ip'] ) ? sanitize_text_field( wp_unslash( $_POST['ip'] ) ) : '';
@@ -657,11 +877,12 @@ class BFG_WPTable {
 		$nonce_action = 'bfg_unblock_ip_' . $ip;
 		$nonce = isset( $_POST['_bfg_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['_bfg_nonce'] ) ) : '';
 		if ( empty( $nonce ) || ! wp_verify_nonce( $nonce, $nonce_action ) ) {
-			wp_die( esc_html( 'Nonce verification failed', self::TEXT_DOMAIN ) );
+			wp_die( esc_html__( 'Nonce verification failed', 'brute-force-guard-lite' ) ); // I18n Fix
 		}
 
 		// 3. Action (SQL Injection safe via $wpdb->delete)
 		// 管理画面からの「ブロック解除」時は、レコードを完全に削除して即座にブロックを解除します
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 		$this->wpdb->delete( $this->table_name, array( 'ip' => $ip ), array( '%s' ) );
 
 		// 4. Redirect
@@ -675,33 +896,40 @@ class BFG_WPTable {
 	 */
 	public static function uninstall() {
 		global $wpdb;
+		
 		$table = $wpdb->prefix . self::TABLE_SUFFIX;
 		// テーブル名は内部的に生成されたものであり、安全にエスケープして DROP TABLE に使用
 		$table = esc_sql( $table );
 		$sql = "DROP TABLE IF EXISTS `$table`";
 		/* phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching */
 		$wpdb->query( $sql );
-
+		
+		$history_table = $wpdb->prefix . self::TABLE_HISTORY;
+		$history_table = esc_sql( $history_table );
+		$sql2 = "DROP TABLE IF EXISTS `$history_table`";
+		/* phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.NoCaching */
+		$wpdb->query( $sql2 );
+		
 		delete_option( self::OPTION_KEY );
 	}
 }
 
 /* ------------------------
- Procedural activation / uninstall wrappers
- (register_*_hook requires callable in global scope)
- ------------------------ */
+ Procedural activation / uninstall wrappers
+ (register_*_hook requires callable in global scope)
+ ------------------------ */
 
 /**
- * Activation wrapper
- */
+ * Activation wrapper
+ */
 function bfg_plugin_activate() {
 	BFG_WPTable::activate();
 }
 register_activation_hook( __FILE__, 'bfg_plugin_activate' );
 
 /**
- * Uninstall wrapper
- */
+ * Uninstall wrapper
+ */
 function bfg_plugin_uninstall() {
 	BFG_WPTable::uninstall();
 }

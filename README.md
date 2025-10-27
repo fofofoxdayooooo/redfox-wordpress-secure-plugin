@@ -38,7 +38,7 @@ team redfox. wordpress-secure-plugin
 * gutenberg-hack-target-blankは、Gutenberg使用時に外部のaタグを一括してtarget blankにしてくれると同時に全画像を一括でリンクしてくれます（クラシックエディタでも利用可能）。
 * media-access-restrictorは、管理者以外の複数人管理サイト向けで、管理者以外の利用者は別の利用者の投稿ファイルを見ることができなくなります。編集者は許可制で閲覧可能（情報漏洩対策）。
 * REST API and XML Blockerはhttps://wordpress.org/plugins/rest-api-shield-xml-rpc-blocker/ からダウンロードしてください（規約の関係上）。
-* api-write-blockerは、REST APIやadmin-ajax.phpの動作を制限します（POST,PUT.DELETEなど）。そのためContact Form 7などは明示的にホワイトリストに追加する必要があります。https://wordpress.org/plugins/api-write-blocker/からダウンロードしてください（規約の関係上）。
+* api-write-blockerは、REST APIやadmin-ajax.phpの動作を制限します（POST,PUT.DELETEなど）。そのためContact Form 7などは明示的にホワイトリストに追加する必要があります。https://wordpress.org/plugins/api-write-blocker/ からダウンロードしてください（規約の関係上）。
 
 # 組み合わせて使うと？
 組み合わせて使うことを主目的としています。単体だけではなく、これらすべてを有効にしてデータを多層防御することが目的です。

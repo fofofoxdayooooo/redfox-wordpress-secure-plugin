@@ -4,7 +4,7 @@ Tags: upload, security, file size, mime, media
 Requires at least: 6.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 1.0
+Stable tag: 0.9
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -116,5 +116,6 @@ The plugin follows WordPress Coding Standards (WPCS).
 All options use the Settings API (register_setting / add_settings_field).
 
 Security first: early execution priority (wp_handle_upload_prefilter, priority 1).
+
 
 Uninstall hook (register_uninstall_hook) ensures full cleanup.

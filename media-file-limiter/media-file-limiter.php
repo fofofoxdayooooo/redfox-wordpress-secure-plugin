@@ -3,7 +3,7 @@
  * Plugin Name: Media File Limiter
  * Description: メディアファイルアップロードの最大サイズを制限し、危険な拡張子のファイルをブロックします。
  * Plugin URI: https://p-fox.jp/
- * Version: 1.0
+ * Version: 0.9
  * Author: Red Fox(team Red Fox)
  * Author URI: https://p-fox.jp/
  * License: GPLv2 or later
